@@ -1,0 +1,21 @@
+{
+  "name": "ghuri-workspace",
+  "private": true,
+  "type": "module",
+  "description": "Ghuri meta repo and local development workspace",
+  "workspaces": ["packages/*", "examples/*"],
+  "scripts": {
+    "bootstrap": "bash scripts/bootstrap.sh",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3",
+    "tsup": "^8.5.1",
+    "vitest": "^5.1.0",
+    "@biomejs/biome": "^2.6.6",
+    "@types/node": "^24.0.0",
+    "wrangler": "^4.160.0"
+  }
+}
