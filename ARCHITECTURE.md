@@ -737,3 +737,35 @@ mysite/
 `@ghuri/tasks` (Cloudflare Queues + Node worker), `@ghuri/mail` (Email Workers / SMTP / Resend),
 `@ghuri/forms` (standalone forms), i18n, Redis cache, read replicas / DB routers, `@ghuri/realtime`
 (Durable Objects / WebSockets), GraphQL.
+
+---
+
+## 14. As-built notes (supersede earlier sections where they conflict)
+
+**core** (github.com/ghurijs/core): extra exports `urlpatterns(appName, list)`, `resolve`, `resolverMatch(c)`,
+`registerConverter`, `handleException`, `registerExceptionHandler(ClassOrPredicate, fn)`, `wantsJson`,
+`settingsFor(c)`, `XFrameOptionsMiddleware`, `toHonoMiddleware`, CSRF helpers (`csrfExempt`,
+`ensureCsrfCookie`, `getCsrfToken`, `rotateCsrfToken`, `enforceCsrf`, `checkCsrf`, `CsrfFailure`; Django masked
+token format), `onSchedule(cron|'*', fn)`, `onQueue(name|'*', fn)`, `setting(name, fallback)`,
+`AppConfig.modules`, errors `MethodNotAllowed`, `DisallowedHost`. Testing: `registerTestClientHook('forceLogin'|'login'|'logout', fn)`.
+Errors under `API_PATH_PREFIXES` (default `['/api']`) are always JSON.
+
+**orm** (github.com/ghurijs/orm):
+- QuerySet compiles with its own SQL builder (not drizzle `sql`); drizzle tables still exist (`getTable`, `getSchema`).
+- Drizzle column builder is `field.drizzleColumn(dialect)` (`field.column` is the column name).
+- Default reverse accessor is camelCase `${modelName}Set` (e.g. `user.postSet`) with query name `post`; use `relatedName`.
+- `inBulk()` returns a `Map`; `qs.delete()` returns `[total, perModel]`.
+- D1 `atomic()` has no rollback; use `connection.batch()` for all-or-nothing.
+- Results typed as the subclass need `declare static objects: Manager<Post>`.
+- Extra exports: `Prefetch`, `Value`, `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `RawSQL`, `Func`,
+  `captureQueries`, `onQuery`, `onCommit`, `getListOr404`, `IntegrityError`, `ProtectedError`, `RestrictedError`, `FieldError`.
+- Historical models: `createModelClass(name, fields, { meta, registry: new ModelRegistry({ isolated: true }) })`.
+- `@ghuri/orm/testing`: `setupTestDatabase`, `createTablesForModels`, `setTestSchemaCreator`, `testBackends`.
+
+**Decided after review:**
+- ORM commands take Django's `--database <alias>` option. Moving data between databases:
+  `DATABASES = { default: d1('DB'), pg: postgres({ url }) }` then `ghuri migrate --database pg` and
+  `ghuri dumpdata --database default > data.json && ghuri loaddata data.json --database pg`
+  (plus a convenience `ghuri copydata --from default --to pg`).
+- REST: `serializer.isValid()` is async (`await s.isValid({ raiseException: true })`), output via `await s.getData()`.
+- Permission composition: `IsAuthenticated.or(IsAdminUser)`, `.and()`, `.not()` static helpers returning a permission class.
