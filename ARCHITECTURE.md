@@ -769,3 +769,17 @@ Errors under `API_PATH_PREFIXES` (default `['/api']`) are always JSON.
   (plus a convenience `ghuri copydata --from default --to pg`).
 - REST: `serializer.isValid()` is async (`await s.isValid({ raiseException: true })`), output via `await s.getData()`.
 - Permission composition: `IsAuthenticated.or(IsAdminUser)`, `.and()`, `.not()` static helpers returning a permission class.
+
+**orm migrations** (as built): `preMigrate`/`postMigrate` from `@ghuri/orm` (sender = AppConfig, args `{ appConfig, using, plan }`);
+`@ghuri/orm/migrations` is Workers-safe and exports `Migration`, `operations`, `ProjectState`, `MigrationLoader/Graph/Executor/Recorder`,
+`MigrationAutodetector`, `MigrationWriter`, `makeMigrations`, `migrate`, `showMigrations`, `sqlMigrate`, `sqlMigrateAll`, `dumpData`,
+`loadData`, `flushDatabase`, `copyData`. `@ghuri/orm/commands` (Node) exports `registerOrmCommands()` and `setMigrationImporter()`.
+One-off defaults are stored as `oneOffDefault`; index names are always explicit; SQLite/D1 rebuilds copy via a temp table (D1 can't
+disable FKs); `sqlmigrate --all` SQL files record their own `ghuri_migrations` rows; `postMigrate` also fires after `flush` and
+`setupTestDatabase`. Not yet: `squashmigrations`, `inspectdb`, swappable-dependency markers, PK/auto-field changes.
+
+**auth** (as built): app labels `contenttypes`, `auth`, `sessions`, `authtoken`, `token_blacklist`; Django table names
+(`auth_user`, `django_content_type`, `django_session`, …); hashes/signing/sessions byte-compatible with Django; default PBKDF2
+100,000 iterations (higher counts verified via JS fallback and rehashed on login). REST auth classes in `@ghuri/auth/rest`.
+
+**storage** (as built): `FieldFile.toJSON()` returns the stored name; assign uploads with `upload(file)`; `presignedUrl()` (S3 only).
