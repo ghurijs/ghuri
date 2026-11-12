@@ -45,6 +45,7 @@ One GitHub repo per package under `github.com/ghurijs`. npm scope `@ghuri`. All 
 | `storage` | `@ghuri/storage` | Storage API, R2 / S3 / filesystem / memory backends, `FileField`/`ImageField` | core, orm |
 | `admin` | `@ghuri/admin` | Django-admin clone (SSR with Hono JSX + htmx) | core, orm, auth, (optional) storage |
 | `agents` | `@ghuri/agents` | Agent classes, model/viewset tools, conversation memory, MCP server | core, orm, rest, `ai` |
+| `realtime` | `@ghuri/realtime` | Channels-style WebSocket consumers, rooms (Durable Objects on Workers, in-process on Node), channel layer, test communicator | core, (optional) auth, rest |
 | `cli` | `@ghuri/cli` | `ghuri` binary (`startproject`, `startapp`, `runserver`, `migrate`, …) | core, orm |
 | `create-ghuri` | `create-ghuri` | `npm create ghuri@latest` → runs `startproject` | — |
 | `docs` | — | Starlight docs site | — |
@@ -824,7 +825,7 @@ path('graphql/', GraphQLView.asView({ schema, graphiql: true }))
 
 ## 16. `@ghuri/realtime` (Channels-style WebSockets)
 
-Status: **specified, not built.** Repo `ghurijs/realtime`, npm `@ghuri/realtime`, peers `@ghuri/core`
+Status: **phase 1 built** (see 16.11 for where it differs from this text). Repo `ghurijs/realtime`, npm `@ghuri/realtime`, peers `@ghuri/core`
 (required) and `@ghuri/auth`, `@ghuri/rest` (optional, for authentication and permission classes).
 
 Django Channels gives Django developers consumers, groups and a channel layer. Ghuri keeps those names,
@@ -871,8 +872,8 @@ const app = createApp(settings)
 export default app
 export const GhuriRoom = createRoomClass(app)
 
-// src/settings.ts
-REALTIME: { LAYER: env.REALTIME ? durableObjectLayer('REALTIME') : memoryLayer() }
+// src/settings.ts (memoryLayer() on Node and in tests)
+REALTIME: { LAYER: durableObjectLayer('REALTIME') }
 ```
 ```jsonc
 // wrangler.jsonc
@@ -1076,11 +1077,33 @@ DO RPC) is tested end to end; it joins the portability matrix (12) for Workers a
    one-way feeds), `broadcastModelChanges(Model, { room, serializer })` built on ORM `postSave`/`postDelete`.
 3. **Later**: Redis layer, room sharding, message replay.
 
-### 16.10 Open questions
+### 16.10 Decisions (were open questions)
 
-- Should `static room` default to the route path (`ws/chat/lobby/` → one room per URL) instead of being
-  required? Convenient, but makes per-user rooms easy to forget.
-- `groupSend` from inside a DO to *another* room is a DO-to-DO RPC. Is that fine for `user.<pk>` fan-out from
-  a busy chat room, or should those sends go through `executionCtx.waitUntil` so the sender is not slowed?
-- Whether `durableObjectLayer` should also accept a Cloudflare Agents SDK `Agent` class as the room host, so
-  `@ghuri/agents` can stream agent runs to a room.
+- `static room` is optional and defaults to the request path (one room per URL).
+- `groupSend` (including DO-to-DO RPC to another room) resolves after the room ran every handler. Callers that
+  should not wait pass the promise to `executionCtx.waitUntil`.
+- Hosting rooms in a Cloudflare Agents SDK `Agent` is deferred (phase 3).
+
+### 16.11 As built (supersedes 16.1–16.8 where they conflict)
+
+- **No core 101 pass-through was needed.** `durableObjectLayer` re-wraps the room's `101` in
+  `new Response(null, { status: 101, webSocket, headers })`, whose headers are mutable, so the default MIDDLEWARE
+  stack (Security, Session, Common, Csrf, Authentication, XFrameOptions) runs unchanged; verified in workerd.
+  `isUpgradeResponse` and the `SessionMiddleware` change were dropped.
+- **`memoryLayer()` is Node and tests only.** Workers forbid writing to a socket from another request's handler, so
+  in-isolate rooms cannot fan out; on Workers `memoryLayer()` throws `ImproperlyConfigured` pointing to
+  `durableObjectLayer`. `wrangler dev` runs Durable Objects locally, so projects use the DO layer in development too.
+- **Node:** core `serve()` is unchanged. `@ghuri/realtime/node` exports `attachRealtime(server, app, { env })` (on
+  `ws`), used with the server `serve()` returns. The handshake still runs through `app.fetch`; a `PendingUpgrade`
+  registered for the `Request` lets the consumer view accept, and the upgrade completes only on accept.
+- **Core changes shipped:** `app.run(env, execCtx, fn)`; `registerUserLoader` / `loadUser`. `@ghuri/auth` registers
+  the loader in `AuthConfig.ready()` (only when core provides it).
+- **Tags** are stored in the connection record, not Cloudflare hibernation tags (those are fixed at
+  `acceptWebSocket` time). Limits stay 10 tags of ≤ 256 characters.
+- **Handshake outcomes:** `connect()` that neither accepts nor closes rejects with 403 (not a 1011 close); a scope
+  that would not fit in 2 KB is refused with 431 before reaching the room; `Origin: null` is refused.
+- **The room DO** receives the scope URI-encoded in `X-Ghuri-Scope` (headers must be Latin-1), resolves the consumer
+  class with core `resolve(scope.path)`, runs every event through `app.run`, and prefixes its storage keys with
+  `room:`. RPC methods: `groupSend`, `broadcast`, `sendTo`, `connections`, `storageGet/Put/Delete/List`.
+- Not yet: `ghuri check` warning for `memoryLayer` in production, `startproject --realtime`, the docs topic, the
+  `examples` chat app.
