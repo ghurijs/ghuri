@@ -11,6 +11,12 @@
 # Dist-tag per package, when none is forced: a stable version goes to `latest`. A prerelease goes to `latest`
 # while the package has no stable release at all (so `npm install` and `npm create ghuri` get the newest alpha
 # instead of the first one), and to `next` once a stable release exists (so it never replaces stable users).
+
+# Needs bash (process substitution below). `sh scripts/publish-all.sh` runs bash in POSIX mode (macOS) or another
+# shell, which fails with "syntax error near unexpected token `>'", so re-run under bash in that case.
+case "${BASH_VERSION:-}:${SHELLOPTS:-}" in
+  :* | *posix*) exec bash "$0" "$@" ;;
+esac
 set -euo pipefail
 cd "$(dirname "$0")/.."
 MODE=publish
