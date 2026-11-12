@@ -787,6 +787,12 @@ disable FKs); `sqlmigrate --all` SQL files record their own `ghuri_migrations` r
 
 **storage** (as built): `FieldFile.toJSON()` returns the stored name; assign uploads with `upload(file)`; `presignedUrl()` (S3 only).
 
+**rest** (as built): `RestFrameworkConfig` (app label `rest_framework`) only contributes the `generateschema` command
+(DRF's: `--file`, `--format openapi|openapi-json`, `--title`, `--description`, `--api-version`, `--url`). It reuses the
+first `SchemaView` routed in `ROOT_URLCONF` (its title/version/servers/patterns/prefix), so the file equals what that
+view serves; a `--file` ending in `.json` defaults to JSON. YAML comes from a built-in emitter (no dependency).
+`startproject` routes `api/schema/`, `api/docs/` (Swagger UI) and `api/reference/` (Scalar) before the router include.
+
 ---
 
 ## 15. `@ghuri/graphql` (graphene-django style)
