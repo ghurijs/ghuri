@@ -32,7 +32,7 @@ if [ ! -t 0 ]; then
   echo "so npm would fail with EOTP. Type the command into a terminal window yourself and press Enter at each prompt."
   exit 1
 fi
-ORDER=(core mail orm storage auth rest admin agents graphql realtime oauth socialauth tenants cli create-ghuri)
+ORDER=(core mail orm storage auth rest admin agents graphql realtime oauth oauth-provider socialauth tenants cli create-ghuri)
 
 is_prerelease() { [[ "$1" == *-* ]]; }
 

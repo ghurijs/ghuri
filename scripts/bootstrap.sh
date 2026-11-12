@@ -2,7 +2,7 @@
 # Clone every Ghuri package repo into packages/ and install the workspace.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-REPOS=(core mail orm auth rest storage admin agents graphql realtime oauth socialauth tenants cli create-ghuri)
+REPOS=(core mail orm auth rest storage admin agents graphql realtime oauth oauth-provider socialauth tenants cli create-ghuri)
 mkdir -p packages
 for r in "${REPOS[@]}"; do
   [ -d "packages/$r/.git" ] || git clone "https://github.com/ghurijs/$r.git" "packages/$r"

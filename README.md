@@ -46,6 +46,7 @@ const recent = await Post.objects.filter({ author__username: 'rifat' }).orderBy(
 | [`@ghuri/graphql`](https://github.com/ghurijs/graphql) | GraphQL in graphene-django style: model types, Relay connections and filters, serializer mutations, GraphiQL |
 | [`@ghuri/realtime`](https://github.com/ghurijs/realtime) | WebSockets in Django Channels style: consumers in `urls.ts`, rooms on Durable Objects, `channelLayer` |
 | [`@ghuri/oauth`](https://github.com/ghurijs/oauth) | Passport.js-style login strategies: OAuth2, OpenID Connect, local, magic link, bearer |
+| [`@ghuri/oauth-provider`](https://github.com/ghurijs/oauth-provider) | OAuth 2.1 authorization server like django-oauth-toolkit: PKCE, CIMD, dynamic registration; OAuth for MCP servers |
 | [`@ghuri/socialauth`](https://github.com/ghurijs/socialauth) | Social login like django-allauth: GitHub, Google, Facebook, Microsoft, Discord, GitLab, any OIDC |
 | [`@ghuri/tenants`](https://github.com/ghurijs/tenants) | Shared-schema multi-tenancy: tenant-scoped models and QuerySets that fail closed, request resolvers, leak tests |
 | [`@ghuri/storage`](https://github.com/ghurijs/storage) | R2 / S3 / filesystem storage, `FileField` |
