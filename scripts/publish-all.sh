@@ -15,6 +15,15 @@ for p in "${ORDER[@]}"; do
     echo "skip $name@$version (already published)"; continue
   fi
   echo "publishing $name@$version --tag $TAG"
-  (cd "packages/$p" && npm publish --access public --tag "$TAG" --auth-type=web)
+  log=$(mktemp)
+  if ! (cd "packages/$p" && npm publish --access public --tag "$TAG" --auth-type=web 2>&1 | tee "$log"; exit "${PIPESTATUS[0]}"); then
+    # npm holds a fresh upload as "staged" for several minutes: `npm view` says 404 but a re-publish gets 409.
+    if grep -q 'previously staged version' "$log"; then
+      echo "skip $name@$version (staged by an earlier run; npm will show it within ~20 minutes)"
+    else
+      rm -f "$log"; exit 1
+    fi
+  fi
+  rm -f "$log"
 done
 echo "Done. Try: npm create ghuri@$TAG mysite"
