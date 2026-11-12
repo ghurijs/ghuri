@@ -754,6 +754,11 @@ mysite/
 token format), `onSchedule(cron|'*', fn)`, `onQueue(name|'*', fn)`, `setting(name, fallback)`,
 `AppConfig.modules`, errors `MethodNotAllowed`, `DisallowedHost`. Testing: `registerTestClientHook('forceLogin'|'login'|'logout', fn)`.
 Errors under `API_PATH_PREFIXES` (default `['/api']`) are always JSON.
+`xframeOptionsExempt(view)` / `static xframeOptionsExempt = true` (Django's `xframe_options_exempt`) use a marker
+like `csrfExempt`; a header the view sets itself always wins. `getRemoteAddr(c)` is Django's `REMOTE_ADDR` and reads
+only unforgeable sources: `CF-Connecting-IP` on Cloudflare (`navigator.userAgent === 'Cloudflare-Workers'` or
+`request.cf`), else the socket address `serve()` records with `setRemoteAddr(request, addr)` (a `WeakMap` keyed by the
+`Request`, so `env` stays the settings env), else `c.env.incoming` (plain `@hono/node-server`), else `''`.
 
 **orm** (github.com/ghurijs/orm):
 - QuerySet compiles with its own SQL builder (not drizzle `sql`); drizzle tables still exist (`getTable`, `getSchema`).
@@ -794,6 +799,10 @@ disable FKs); `sqlmigrate --all` SQL files record their own `ghuri_migrations` r
 first `SchemaView` routed in `ROOT_URLCONF` (its title/version/servers/patterns/prefix), so the file equals what that
 view serves; a `--file` ending in `.json` defaults to JSON. YAML comes from a built-in emitter (no dependency).
 `startproject` routes `api/schema/`, `api/docs/` (Swagger UI) and `api/reference/` (Scalar) before the router include.
+**Deliberate difference from DRF:** throttles read `X-Forwarded-For` only when `NUM_PROXIES` is set (then DRF's rule:
+the address `NUM_PROXIES` hops from the end, `0` ignores the header). DRF trusts the whole header when `NUM_PROXIES` is
+`None`, which lets any client pick a fresh rate-limit bucket per request. Otherwise `getIdent()` uses core's
+`getRemoteAddr(c)` (via the overridable `BaseThrottle.getRemoteAddr(request)`).
 
 **mail** (as built, github.com/ghurijs/mail): `django.core.mail` with camelCase names and async sending: `sendMail`,
 `sendMassMail`, `mailAdmins`, `mailManagers`, `EmailMessage`, `EmailMultiAlternatives`, `getConnection`,
