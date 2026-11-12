@@ -736,7 +736,7 @@ mysite/
 
 `@ghuri/tasks` (Cloudflare Queues + Node worker), `@ghuri/mail` (Email Workers / SMTP / Resend),
 `@ghuri/forms` (standalone forms), i18n, Redis cache, read replicas / DB routers, `@ghuri/realtime`
-(Durable Objects / WebSockets), GraphQL.
+(Durable Objects / WebSockets, specified in section 16), GraphQL.
 
 ---
 
@@ -818,4 +818,269 @@ path('graphql/', GraphQLView.asView({ schema, graphiql: true }))
 - Auth: request user from core `getUser(c)`; REST authentication classes usable via `GraphQLView.authenticationClasses`; `loginRequired`/`permissionRequired` resolver wrappers.
 - HTTP: GraphQL-over-HTTP (GET for queries, POST JSON, `application/graphql-response+json`), GraphiQL from CDN when enabled, CSRF exemption only with token auth, depth/complexity limits, persisted query hook, introspection toggle.
 - Settings `GRAPHQL: { SCHEMA, GRAPHIQL, MAX_DEPTH, MAX_COMPLEXITY, INTROSPECTION }`; command `graphql_schema` (prints SDL).
-- Subscriptions are out of scope for 0.1 (later via Durable Objects).
+- Subscriptions are out of scope for 0.1 (later via `@ghuri/realtime`, section 16).
+
+---
+
+## 16. `@ghuri/realtime` (Channels-style WebSockets)
+
+Status: **specified, not built.** Repo `ghurijs/realtime`, npm `@ghuri/realtime`, peers `@ghuri/core`
+(required) and `@ghuri/auth`, `@ghuri/rest` (optional, for authentication and permission classes).
+
+Django Channels gives Django developers consumers, groups and a channel layer. Ghuri keeps those names,
+but its unit of fan-out is a **room**, because the Cloudflare primitive is a Durable Object (DO): one
+globally unique, single-threaded object that holds a set of sockets. Every connection lives in exactly
+one room, and the same rule applies on Node so code that works locally behaves the same on Workers.
+
+```ts
+// src/chat/consumers.ts
+import { JsonWebSocketConsumer, type Scope } from '@ghuri/realtime'
+import { IsAuthenticated } from '@ghuri/rest'
+
+export class ChatConsumer extends JsonWebSocketConsumer {
+  static room = (scope: Scope) => `chat.${scope.params.room}`   // which room (DO) owns this socket
+  static permissionClasses = [IsAuthenticated]
+
+  async connect() {
+    await this.accept()
+    await this.room.broadcast({ type: 'chat.joined', user: this.user.username }, { exclude: this })
+  }
+  async receiveJson(data: { text: string }) {
+    const msg = await Message.objects.create({ room: this.scope.params.room, author: this.user.pk, text: data.text })
+    await this.room.groupSend({ type: 'chat.message', id: msg.pk, text: msg.text, user: this.user.username })
+  }
+  async chatMessage(event: { id: number; text: string; user: string }) {   // 'chat.message' → chatMessage
+    await this.sendJson(event)
+  }
+}
+
+// src/chat/urls.ts — routed like any view; runs through MIDDLEWARE (session, auth) on the handshake
+export const urlpatterns = [path('ws/chat/<slug:room>/', ChatConsumer.asView(), { name: 'chat-socket' })]
+
+// anywhere else: a REST view, a signal receiver, a cron or queue handler
+import { channelLayer } from '@ghuri/realtime'
+await channelLayer.groupSend('chat.lobby', { type: 'chat.message', text: 'Server restarting in 5 minutes' })
+```
+
+```ts
+// src/index.ts (Cloudflare) — the app plus the Durable Object class that hosts rooms
+import { createApp } from '@ghuri/core'
+import { createRoomClass } from '@ghuri/realtime/cloudflare'
+import settings from './settings'
+const app = createApp(settings)
+export default app
+export const GhuriRoom = createRoomClass(app)
+
+// src/settings.ts
+REALTIME: { LAYER: env.REALTIME ? durableObjectLayer('REALTIME') : memoryLayer() }
+```
+```jsonc
+// wrangler.jsonc
+"durable_objects": { "bindings": [{ "name": "REALTIME", "class_name": "GhuriRoom" }] },
+"migrations": [{ "tag": "realtime-v1", "new_sqlite_classes": ["GhuriRoom"] }]
+```
+
+### 16.1 Consumers
+
+```ts
+export abstract class WebSocketConsumer {
+  static room: string | ((scope: Scope) => string | null | Promise<string | null>)   // null → 403
+  static authenticationClasses?: AuthenticationClass[]   // default: the user MIDDLEWARE set (core getUser)
+  static permissionClasses?: PermissionClass[]           // checked on the handshake, before connect()
+  static subprotocols?: string[]                         // offered back in Sec-WebSocket-Protocol
+  static asView(initkwargs?): ViewFunction
+
+  readonly scope: Scope              // what the handshake established (below); survives hibernation
+  readonly user: RequestUser         // from scope.user; see 16.5
+  readonly room: Room                // the room this socket belongs to
+  state: Record<string, unknown>     // per-connection JSON state; persisted after every handler
+
+  connect(): Promise<void>           // default: accept()
+  receive(message: { text?: string; bytes?: ArrayBuffer }): Promise<void>
+  disconnect(code: number, reason: string): Promise<void>
+
+  accept(subprotocol?: string): Promise<void>
+  send(message: string | ArrayBuffer): Promise<void>
+  close(code?: number, reason?: string): Promise<void>
+  tag(...tags: string[]): Promise<void>   // labels inside the room, for broadcast filters
+}
+export abstract class JsonWebSocketConsumer extends WebSocketConsumer {
+  receiveJson(data: unknown): Promise<void>
+  sendJson(data: unknown): Promise<void>
+}
+
+export interface Scope {
+  path: string; params: Record<string, string>; query: Record<string, string>
+  routeName?: string; room: string; connectionId: string           // connectionId: random, stable for the socket's life
+  headers: { origin?: string; userAgent?: string; subprotocols: string[] }
+  user: UserSnapshot; sessionKey?: string; auth?: unknown          // auth: token payload from the auth class, if JSON-safe
+}
+```
+- Group events are dispatched by `type`: dots and dashes become camelCase (`chat.message` → `chatMessage`).
+  A missing handler logs a warning (DEBUG) and drops the event; Channels raises, but here the sender is
+  often another request that should not fail.
+- A consumer instance is **not** long-lived. It is rebuilt from `scope` + `state` for every event, because
+  a hibernating DO drops its memory (16.3). Fields assigned on `this` other than `state` are lost between
+  events. `state` plus `scope` must serialize to **≤ 2 KB** (Cloudflare's per-socket attachment limit);
+  exceeding it throws `RealtimeStateTooLarge` on both backends.
+- `connect()` that neither accepts nor closes is closed with 1011 once it returns. `close()` before
+  `accept()` rejects the handshake with 403.
+- Every handler runs inside a Ghuri context (`getContext()`, ORM connections, `getUser()` returning
+  `this.user`), created per event like a request.
+
+### 16.2 Routing and the handshake
+
+`Consumer.asView()` returns an ordinary core view, so WebSocket routes live in `urls.ts`, support
+`reverse()` and `include()`, and pass through `MIDDLEWARE` like any GET request. The handshake:
+
+1. Not `Upgrade: websocket` → 426 Upgrade Required.
+2. MIDDLEWARE runs as usual (host validation, session, `AuthenticationMiddleware`).
+3. Origin check (Cross-Site WebSocket Hijacking protection): a browser `Origin` must match the request host,
+   `CSRF_TRUSTED_ORIGINS` or `REALTIME.ALLOWED_ORIGINS`, else 403. Requests without `Origin` (non-browser
+   clients) pass. CSRF tokens are not required: the upgrade is a GET.
+4. `authenticationClasses` run against the handshake (same `BaseAuthentication` contract as REST). Browsers
+   cannot set `Authorization` on a WebSocket, so a token may arrive as a subprotocol
+   (`Sec-WebSocket-Protocol: ghuri, bearer.<token>`, default) or, opt-in, as `?token=` (it ends up in logs).
+   Realtime copies it into `Authorization: <keyword> <token>` on the request handed to the classes;
+   the keyword is `REALTIME.TOKEN_KEYWORD` (default `Bearer`).
+5. `permissionClasses` run with `request.user`; failure → 401/403.
+6. `room` is resolved; `null` → 403.
+7. The socket is handed to the layer: on Workers, the view forwards the upgrade to the room's DO and returns
+   its `101` response; on Node it is accepted in-process. `connect()` runs **in the room** (in the DO).
+
+**Core change required:** a `101` response from a DO has immutable headers and carries a `webSocket`
+property that cloning drops. Core must pass upgrade responses through untouched: `toHonoMiddleware` and the
+built-in middleware skip header writes when `res.status === 101`, and core exports `isUpgradeResponse(res)`
+for third-party middleware. `@ghuri/auth`'s `SessionMiddleware` must skip `Vary`/cookie writes on `101`
+(a session modified during the handshake is still saved, but no cookie is set). Covered by a test that
+runs the default `startproject` MIDDLEWARE stack against a DO upgrade in Miniflare.
+
+### 16.3 Rooms and the channel layer
+
+```ts
+export interface Room {
+  readonly name: string
+  groupSend(event: { type: string; [k: string]: unknown }, opts?: BroadcastOptions): Promise<void>   // runs handlers
+  broadcast(message: unknown, opts?: BroadcastOptions): Promise<void>   // raw send (JSON-encoded unless string/bytes)
+  connections(opts?: { tag?: string }): Promise<ConnectionInfo[]>       // presence: id, user pk, tags, connectedAt
+  count(opts?: { tag?: string }): Promise<number>
+  storage: RoomStorage   // small durable per-room KV: get/put/delete/list; DO SQLite on Workers, memory on Node
+}
+interface BroadcastOptions { tag?: string; exclude?: WebSocketConsumer | string /* connectionId */ }
+
+export const channelLayer: {
+  room(name: string): Room                      // works outside a consumer: views, signals, cron, queues
+  groupSend(room: string, event, opts?): Promise<void>
+  send(connectionId: string, event): Promise<void>   // one socket; needs its room: ids are `<room>:<uuid>`
+}
+```
+- `groupSend` runs the matching handler once per connection (each consumer decides what to send, e.g.
+  filtering by `this.user`); `broadcast` sends the same frame to every socket without running consumer code,
+  so prefer it for large rooms.
+- Sending to a room with no connections is a no-op. Delivery is at-most-once; there is no replay. Clients
+  that need history load it over REST on reconnect.
+- Per-user notifications use a room per user:
+  ``static room = (s) => s.user.isAuthenticated ? `user.${s.user.pk}` : null``,
+  and ``channelLayer.groupSend(`user.${pk}`, …)`` from anywhere.
+- Not supported (deliberately): one socket in several rooms. Clients open one socket per room, or the server
+  fans out to the per-user room. Channels' `group_add`/`group_discard` map to `tag()` inside the room.
+
+### 16.4 Layers
+
+| | `durableObjectLayer(binding)` (Workers) | `memoryLayer()` (Node, tests) | `postgresLayer(alias?)` (Node, phase 2) |
+|---|---|---|---|
+| Room | one DO per room name (`idFromName`) | in-process map | in-process map per process |
+| Cross-process send | DO RPC from any Worker | single process only | `LISTEN/NOTIFY` on the `DATABASES` alias |
+| Survives deploys | sockets drop on DO code update; clients reconnect | no | no |
+
+**Cloudflare.** `createRoomClass(app)` returns a DO class that:
+- accepts sockets with the Hibernation API (`ctx.acceptWebSocket(ws, tags)`), stores `scope` + `state` with
+  `ws.serializeAttachment()`, and rebuilds consumers in `webSocketMessage` / `webSocketClose` /
+  `webSocketError`; tags are the room tags (Cloudflare allows 10 per socket, 256 chars each);
+- runs each event through a new public core method `app.run(env, executionCtx, fn)` (today's private
+  `withTaskContext`, used by `scheduled`/`queue`), so apps are populated once per DO and every event has a
+  fresh context. The DO's `env` has the same bindings as the Worker, so D1, R2 and KV work in consumers;
+- receives the handshake as an internal `fetch` with the scope in an `X-Ghuri-Scope` header (DOs are only
+  reachable through the binding, so the header cannot be forged from outside), and `groupSend`/`broadcast`/
+  `connections` as DO RPC methods;
+- answers `ping` with `pong` without waking (`setWebSocketAutoResponse`), so idle sockets cost nothing.
+
+A room is one single-threaded object: practical limits are a few thousand sockets and the CPU of one
+isolate. Sharding a room is out of scope; very large audiences should use `broadcast`, not `groupSend`.
+
+**Node.** `serve()` from `@ghuri/core/node` gains `{ websocket: true }` (automatic when `@ghuri/realtime` is
+installed and `REALTIME` is set): it wires `@hono/node-ws` to the server `serve()` already returns, and the
+consumer view accepts in-process. `memoryLayer` is the default and correct for one process; multi-process
+or multi-machine deployments need `postgresLayer` (phase 2) or the Redis layer (later). `ghuri check`
+warns when `memoryLayer` is used with `DEBUG = false`.
+
+### 16.5 Users in consumers
+
+- The handshake stores a `UserSnapshot` in the scope: `{ pk, username, isAuthenticated, isActive, isStaff, isSuperuser }`.
+  `this.user` implements core's `RequestUser` from that snapshot; `hasPerm` / `hasPerms` load the real user
+  on first use per event.
+- **Core change required:** `registerUserLoader(fn: (pk) => Promise<RequestUser | null>)` and `loadUser(pk)`
+  in core (next to `getUser`/`setUser`, 4.12). `@ghuri/auth` registers the loader in `ready()` using
+  `getUserModel()`, so realtime never imports auth.
+- Authentication is checked on the handshake only. `await this.refreshUser()` reloads the user and returns
+  false (and closes with 4401) if they are gone or inactive. With `REALTIME.REVALIDATE_SECONDS` (default 0 =
+  off), the consumer does this automatically before handling an event once the interval has passed.
+  Logout does not close open sockets; apps can send ``channelLayer.groupSend(`user.${pk}`, { type: 'session.ended' })``
+  from a `userLoggedOut` receiver.
+
+### 16.6 Settings
+
+```ts
+REALTIME: {
+  LAYER: durableObjectLayer('REALTIME') | memoryLayer() | postgresLayer('default'),  // { backend, create(env) } like caches
+  ALLOWED_ORIGINS: [],                 // in addition to the host and CSRF_TRUSTED_ORIGINS
+  TOKEN_SOURCES: ['subprotocol'],      // and/or 'query'
+  TOKEN_KEYWORD: 'Bearer',             // 'Token' for authtoken
+  MAX_MESSAGE_BYTES: 1_048_576,        // larger frames close the socket with 1009
+  REVALIDATE_SECONDS: 0,
+}
+```
+
+### 16.7 Testing
+
+`@ghuri/realtime/testing` (memory layer, Node) mirrors Channels' `WebsocketCommunicator`:
+
+```ts
+const ws = new WebSocketCommunicator(app, '/ws/chat/lobby/', { user, headers: { origin: 'http://testserver' } })
+const { connected, subprotocol } = await ws.connect()
+await ws.sendJson({ text: 'hi' })
+expect(await ws.receiveJson({ timeout: 1000 })).toMatchObject({ type: 'chat.message', text: 'hi' })
+expect(await ws.receiveNothing()).toBe(true)
+await ws.disconnect()
+```
+`user` uses the same `forceLogin` hook as the HTTP test client. The `examples` repo adds a chat app and
+runs it in Miniflare against `durableObjectLayer` so the Workers path (hibernation, 101 pass-through,
+DO RPC) is tested end to end; it joins the portability matrix (12) for Workers and Node + `memoryLayer`.
+
+### 16.8 Changes in other packages
+
+| Package | Change |
+|---|---|
+| core | `isUpgradeResponse(res)` + 101 pass-through in `toHonoMiddleware` and built-ins; public `app.run(env, execCtx, fn)`; `registerUserLoader` / `loadUser`; `serve({ websocket })` in `@ghuri/core/node` |
+| auth | register the user loader; `SessionMiddleware` skips header writes on 101; `userLoggedOut` already exists for logout fan-out |
+| cli | `startproject --realtime` adds the DO export, wrangler binding/migration and `REALTIME` settings; `startapp` template gets an empty `consumers.ts` |
+| graphql | phase 2: subscriptions over the `graphql-transport-ws` protocol as a consumer (`GraphQLSubscriptionConsumer`), with `pubsub` backed by rooms |
+| docs | topic "WebSockets", Channels cheat-sheet rows, Cloudflare deployment section for the DO binding |
+
+### 16.9 Phases
+
+1. **0.1**: `WebSocketConsumer`, `JsonWebSocketConsumer`, routing and handshake, rooms with `groupSend`/
+   `broadcast`/tags/presence/storage, `durableObjectLayer`, `memoryLayer`, testing communicator, the core and
+   auth changes above, chat example.
+2. **0.2**: `postgresLayer`, GraphQL subscriptions, `EventStreamView` (server-sent events on the same rooms for
+   one-way feeds), `broadcastModelChanges(Model, { room, serializer })` built on ORM `postSave`/`postDelete`.
+3. **Later**: Redis layer, room sharding, message replay.
+
+### 16.10 Open questions
+
+- Should `static room` default to the route path (`ws/chat/lobby/` → one room per URL) instead of being
+  required? Convenient, but makes per-user rooms easy to forget.
+- `groupSend` from inside a DO to *another* room is a DO-to-DO RPC. Is that fine for `user.<pk>` fan-out from
+  a busy chat room, or should those sends go through `executionCtx.waitUntil` so the sender is not slowed?
+- Whether `durableObjectLayer` should also accept a Cloudflare Agents SDK `Agent` class as the room host, so
+  `@ghuri/agents` can stream agent runs to a room.
