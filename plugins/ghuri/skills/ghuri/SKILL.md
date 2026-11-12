@@ -1,6 +1,6 @@
 ---
 name: ghuri
-description: Write correct code for Ghuri, the Django-style TypeScript framework (Hono + Drizzle, Cloudflare Workers with D1/R2 by default, Node + Postgres too). Use whenever package.json depends on @ghuri/* packages (@ghuri/core, @ghuri/orm, @ghuri/auth, @ghuri/rest, @ghuri/admin, @ghuri/graphql, @ghuri/realtime, @ghuri/storage, @ghuri/agents, @ghuri/cli), files import from them, package.json has a "ghuri" key or `ghuri` scripts, or the user mentions Ghuri. Covers models, queries, migrations, settings, URLs, views, middleware, REST serializers/viewsets/routers, admin, auth, permissions, GraphQL, WebSockets, file storage, AI agents/MCP, signals, cache, cron/queues, management commands, tests and deployment. Ghuri is NOT Python Django, DRF, Prisma or plain Hono, even though names look like Django's; do not write Python or snake_case APIs.
+description: Write correct code for Ghuri, the Django-style TypeScript framework (Hono + Drizzle, Cloudflare Workers with D1/R2 by default, Node + Postgres too). Use whenever package.json depends on @ghuri/* packages (@ghuri/core, @ghuri/orm, @ghuri/auth, @ghuri/rest, @ghuri/admin, @ghuri/graphql, @ghuri/realtime, @ghuri/storage, @ghuri/agents, @ghuri/oauth, @ghuri/socialauth, @ghuri/cli), files import from them, package.json has a "ghuri" key or `ghuri` scripts, or the user mentions Ghuri. Covers models, queries, migrations, settings, URLs, views, middleware, REST serializers/viewsets/routers, admin, auth, permissions, social login (GitHub/Google/OIDC, allauth-style), OAuth/OIDC/magic-link login strategies (Passport-style), GraphQL, WebSockets, file storage, AI agents/MCP, signals, cache, cron/queues, management commands, tests and deployment. Ghuri is NOT Python Django, DRF, Prisma or plain Hono, even though names look like Django's; do not write Python or snake_case APIs.
 ---
 
 # Ghuri
@@ -95,6 +95,10 @@ It is brand new, so your instincts are wrong in predictable ways: the names are 
 - API: `REST_FRAMEWORK.DEFAULT_AUTHENTICATION_CLASSES: [TokenAuthentication, JWTAuthentication, SessionAuthentication]` from `@ghuri/auth/rest`; token/JWT endpoints `obtainAuthToken`, `TokenObtainPairView.asView()`. Object rules: subclass `BasePermission` with `async hasObjectPermission(request, view, obj)`.
 - Custom user: `Model({...}, { extends: AbstractUser })` + `AUTH_USER_MODEL: 'accounts.User'` before the first migrate; reusable code uses `getUserModel()`.
 
+**Add social login / custom login flows** (social-login-and-oauth.md)
+- "Log in with GitHub/Google/…": `npm install @ghuri/socialauth@next @ghuri/oauth@next`, `SocialAuthConfig` in `INSTALLED_APPS`, `SOCIALACCOUNT: { PROVIDERS: { github: { APP: { clientId: env.GITHUB_CLIENT_ID, secret: env.GITHUB_SECRET } } } }`, `path('accounts/', include(socialUrls))`, then `migrate`. Login buttons POST to `/accounts/<provider>/login/` with the CSRF token; callback URL is `/accounts/<provider>/login/callback/`.
+- Your own flow (any OIDC/OAuth2 provider in code, magic links, API keys): `strategies.use('name', new OIDCStrategy({...}, verify))` and `path('login/name/', authenticate('name', {...}))` from `@ghuri/oauth`. Not Passport, not allauth: no `passport.authenticate()`, no `allauth.*` apps.
+
 **Add GraphQL** (graphql.md)
 `GraphQLConfig` in `INSTALLED_APPS`; `ModelType` classes with `static Meta = { model, fields, interfaces: [Node], filterFields }`; a `Query` subclass with `static fields = { allPosts: ConnectionField(PostType) }`; `new Schema({ query: [BlogQuery], mutation: [...], types: [...] })`; `GRAPHQL: { SCHEMA: schema }`; `path('graphql/', GraphQLView.asView())`.
 
@@ -141,6 +145,7 @@ Add `pg: postgres({ url: env.DATABASE_URL })` (or `{ hyperdrive: 'HYPERDRIVE' }`
 | references/urls-views-middleware.md | `urls.ts`, `path`/`include`/`reverse`, function and class-based views, JSX, middleware, AppConfig |
 | references/rest.md | serializers, viewsets, routers, API permissions/authentication, filtering, pagination, throttling, OpenAPI |
 | references/admin.md | `ModelAdmin`, inlines, actions, list filters, admin hooks, custom admin sites |
+| references/social-login-and-oauth.md | `@ghuri/socialauth` (providers, settings, URLs, adapter, SPA/native tokens) and `@ghuri/oauth` (strategies, `authenticate()`, REST bearer auth, testing) |
 | references/auth.md | users, login/logout, sessions, permissions/groups, custom user model, tokens/JWT, password hashing |
 | references/graphql.md | `ModelType`, `Query`/`Mutation`, Relay connections and filters, `SerializerMutation`, `GraphQLView` |
 | references/realtime.md | WebSocket consumers, rooms, `channelLayer`, Durable Objects setup, socket auth |
