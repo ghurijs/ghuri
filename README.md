@@ -47,6 +47,7 @@ const recent = await Post.objects.filter({ author__username: 'rifat' }).orderBy(
 | [`@ghuri/realtime`](https://github.com/ghurijs/realtime) | WebSockets in Django Channels style: consumers in `urls.ts`, rooms on Durable Objects, `channelLayer` |
 | [`@ghuri/oauth`](https://github.com/ghurijs/oauth) | Passport.js-style login strategies: OAuth2, OpenID Connect, local, magic link, bearer |
 | [`@ghuri/socialauth`](https://github.com/ghurijs/socialauth) | Social login like django-allauth: GitHub, Google, Facebook, Microsoft, Discord, GitLab, any OIDC |
+| [`@ghuri/tenants`](https://github.com/ghurijs/tenants) | Shared-schema multi-tenancy: tenant-scoped models and QuerySets that fail closed, request resolvers, leak tests |
 | [`@ghuri/storage`](https://github.com/ghurijs/storage) | R2 / S3 / filesystem storage, `FileField` |
 | [`@ghuri/admin`](https://github.com/ghurijs/admin) | the Django admin, server-rendered on Workers |
 | [`@ghuri/agents`](https://github.com/ghurijs/agents) | AI agents with tools generated from your models and viewsets, MCP server |
