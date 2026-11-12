@@ -81,9 +81,11 @@ Docs (`cd docs`): `npm run build` (Astro/Starlight; also generates `llms.txt` / 
 - Conventional Commits with the package as scope: `feat(orm): …`, `fix(cli): …`, `test(core): …`,
   `docs(orm): …`, `chore(core): release 0.1.0-alpha.1`. The meta repo uses `docs: …` / `chore: …`.
 - Commit only when asked. Do not bump versions or edit CHANGELOG entries for a release unless asked.
-- Packages are alpha and publish under the **`next`** dist-tag. `scripts/publish-all.sh` builds and publishes in
-  dependency order and needs npm 2FA in the browser, so **only the maintainer runs it, while present**. Agents
-  never run `npm publish` or the publish script.
+- Packages are alpha. `scripts/publish-all.sh` picks the dist-tag per package: **`latest`** while a package has no
+  stable release (so `npm create ghuri` and `npm install` get the newest alpha), `next` for prereleases once a
+  stable release exists; `scripts/publish-all.sh <tag>` forces one, and `--sync-latest` re-points `latest` without
+  publishing. It builds and publishes in dependency order and needs npm 2FA in the browser, so **only the
+  maintainer runs it, while present**. Agents never run `npm publish` or the publish script.
 
 ## How to verify a change
 
