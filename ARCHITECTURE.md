@@ -46,6 +46,8 @@ One GitHub repo per package under `github.com/ghurijs`. npm scope `@ghuri`. All 
 | `admin` | `@ghuri/admin` | Django-admin clone (SSR with Hono JSX + htmx) | core, orm, auth, (optional) storage |
 | `agents` | `@ghuri/agents` | Agent classes, model/viewset tools, conversation memory, MCP server | core, orm, rest, `ai` |
 | `realtime` | `@ghuri/realtime` | Channels-style WebSocket consumers, rooms (Durable Objects on Workers, in-process on Node), channel layer, test communicator | core, (optional) auth, rest |
+| `oauth` | `@ghuri/oauth` | Passport.js-style strategies: OAuth2, OIDC, local, magic link, bearer; `authenticate()` views (planned, section 17) | core, auth |
+| `socialauth` | `@ghuri/socialauth` | django-allauth-style social login: providers, `SocialAccount`, signup/linking, admin (planned, section 18) | core, orm, auth, oauth |
 | `cli` | `@ghuri/cli` | `ghuri` binary (`startproject`, `startapp`, `runserver`, `migrate`, …) | core, orm |
 | `create-ghuri` | `create-ghuri` | `npm create ghuri@latest` → runs `startproject` | — |
 | `docs` | — | Starlight docs site | — |
@@ -1107,3 +1109,240 @@ DO RPC) is tested end to end; it joins the portability matrix (12) for Workers a
   `room:`. RPC methods: `groupSend`, `broadcast`, `sendTo`, `connections`, `storageGet/Put/Delete/List`.
 - Not yet: `ghuri check` warning for `memoryLayer` in production, `startproject --realtime`, the docs topic, the
   `examples` chat app.
+
+---
+
+## 17. `@ghuri/oauth` (Passport.js-style strategies)
+
+Status: **specified, not built.** Repo `ghurijs/oauth`, npm `@ghuri/oauth`, peers `@ghuri/core`, `@ghuri/auth`
+(login, sessions, signing, JWT pairs), `hono`.
+
+The building blocks for any login system: a **strategy** turns a request into "this is user X", "this
+request isn't for me", "redirect the browser there" or "fail with 401". Apps register strategies and mount
+`authenticate('name')` views, the way Passport.js apps call `passport.use()` and `passport.authenticate()`.
+`@ghuri/socialauth` (section 18) is built on this package; apps that want their own social login, a custom
+identity provider, magic links or API keys use it directly.
+
+```ts
+// src/accounts/strategies.ts
+import { OAuth2Strategy, OIDCStrategy, MagicLinkStrategy, strategies } from '@ghuri/oauth'
+
+strategies.use('acme', new OIDCStrategy({
+  issuer: 'https://login.acme.example',               // discovery: /.well-known/openid-configuration
+  clientId: (env) => env.ACME_CLIENT_ID,
+  clientSecret: (env) => env.ACME_CLIENT_SECRET,
+  scope: ['openid', 'email', 'profile'],
+}, async ({ profile }) => {                            // verify: profile → user (or null to fail)
+  return (await User.objects.filter({ email: profile.email }).first()) ?? User.objects.create({ … })
+}))
+
+strategies.use('email', new MagicLinkStrategy({
+  send: async ({ email, url }) => sendMail(email, 'Your login link', url),
+}, async ({ email }) => User.objects.filter({ email }).first()))
+
+// src/accounts/urls.ts
+export const urlpatterns = [
+  path('login/acme/', authenticate('acme')),                     // redirects to the provider
+  path('login/acme/callback/', authenticate('acme', { successRedirect: '/', failureRedirect: '/login/' })),
+  path('login/email/', authenticate('email')),                   // POST { email } → sends a link; GET ?token= → logs in
+]
+```
+
+### 17.1 Strategies
+
+```ts
+export type StrategyResult =
+  | { type: 'success'; user: AbstractBaseUser; info?: Record<string, unknown> }
+  | { type: 'fail'; status?: number; challenge?: string; message?: string }   // challenge → WWW-Authenticate
+  | { type: 'redirect'; url: string; status?: number }
+  | { type: 'pass' }                                                          // not for me: try the next strategy
+  | { type: 'error'; error: unknown }
+
+export abstract class Strategy {
+  abstract name: string
+  abstract authenticate(c: Context, options: AuthenticateOptions): Promise<StrategyResult>
+}
+export const strategies: { use(name: string, s: Strategy): void; get(name: string): Strategy; unuse(name: string): void }
+```
+Built-ins:
+
+| Strategy | Does |
+|---|---|
+| `OAuth2Strategy` | Authorization code flow: builds the authorize URL (state, PKCE S256 by default), exchanges the code, calls `profile(tokens)` to fetch and normalize the user, then `verify`. Options: `authorizationURL`, `tokenURL`, `clientId`, `clientSecret` (values or `(env) => value`), `scope`, `scopeSeparator`, `pkce`, `authorizationParams`, `tokenAuth: 'body' \| 'basic'`, `profile`. |
+| `OIDCStrategy` | `OAuth2Strategy` plus discovery (cached per isolate), `nonce`, ID token validation (signature from JWKS: RS256/ES256/EdDSA via WebCrypto; `iss`, `aud`, `exp`, `iat`, `nonce`), userinfo; the profile comes from the claims. |
+| `LocalStrategy` | Username/password from JSON or form fields; default `verify` is `@ghuri/auth`'s `authenticate()` (so `AUTHENTICATION_BACKENDS` apply). |
+| `MagicLinkStrategy` | `POST { email }` sends a signed, single-use, expiring link (`TimestampSigner`; the signature covers the user's `lastLogin`, so it stops working after one login, like password reset tokens); `GET ?token=` logs in. |
+| `BearerStrategy` | `Authorization: Bearer <token>` → `verify(token)`. For API keys and custom tokens. |
+| `CustomStrategy` | `new CustomStrategy('name', (c) => result)` for one-off schemes. |
+
+Every OAuth-flavoured strategy also exposes its pieces (`client.authorizationUrl()`, `client.exchangeCode()`,
+`client.refresh()`, `client.revoke()`), so apps can run the flow by hand.
+
+**Profiles** are normalized to one shape (what `@ghuri/socialauth` stores):
+`{ provider, id, email?, emailVerified?, username?, name?, firstName?, lastName?, avatarUrl?, raw }`.
+
+### 17.2 `authenticate(nameOrNames, options)` → view
+
+```ts
+export interface AuthenticateOptions {
+  successRedirect?: string; failureRedirect?: string
+  successReturnToOrRedirect?: string        // honor a safe ?next= kept across the round trip
+  session?: boolean                          // default true: @ghuri/auth login(c, user)
+  respond?: 'session' | 'jwt' | ((c, user, info) => Response | Promise<Response>)   // jwt → tokenPairForUser()
+  scope?: string[]; state?: Record<string, string>   // per-request extras
+}
+```
+- Several names try strategies in order until one does not `pass` (Passport's chain).
+- Success: `login(c, user, 'ghuri.oauth:<name>')` (a backend name `@ghuri/auth` resolves through a small
+  `StrategyBackend` that `@ghuri/oauth` registers), then redirect, or JSON `{ user }`, or a JWT pair.
+- Failure: `failureRedirect` with `?error=`, or JSON 401 with `WWW-Authenticate` when the strategy sent a challenge.
+- Errors from providers (`error=access_denied` on the callback) become a failure, not a 500.
+- `authenticate()` is also callable as a function inside a view: `const result = await runStrategy(c, 'acme')`.
+
+### 17.3 Round-trip state
+
+OAuth needs `state`, the PKCE verifier, the OIDC `nonce` and `next` to survive the trip to the provider. They go
+in a signed, encrypted, HttpOnly, `SameSite=Lax`, 10-minute cookie (`ghuri_oauth`, AES-GCM with a key derived
+from `SECRET_KEY` via HKDF), so the flow works without sessions (SPAs, Workers with KV-less setups). One cookie
+holds several pending flows (keyed by state) so two tabs don't break each other. The callback rejects missing,
+expired or mismatched state with a failure (never a 500).
+
+### 17.4 REST integration
+
+`@ghuri/oauth/rest` exports `StrategyAuthentication(['api-key'])`: a REST authentication class that runs the named
+strategies (`BearerStrategy`, `CustomStrategy`) and returns `[user, info]`. Same contract as section 7's classes.
+
+### 17.5 Settings
+
+```ts
+OAUTH: {
+  STATE_COOKIE: 'ghuri_oauth', STATE_MAX_AGE: 600,
+  HTTP_TIMEOUT: 10_000,                 // provider requests
+  CALLBACK_BASE_URL: undefined,         // default: the request origin (behind proxies, set this)
+}
+```
+
+### 17.6 Testing
+
+`@ghuri/oauth/testing`: `mockOAuthProvider({ profile, tokens })` intercepts the provider's token and userinfo
+requests (a `fetch` stub scoped to the test), and `client.followOAuth('/login/acme/')` runs the redirect →
+callback round trip through the test client.
+
+---
+
+## 18. `@ghuri/socialauth` (django-allauth style social login)
+
+Status: **specified, not built.** Repo `ghurijs/socialauth`, npm `@ghuri/socialauth`, peers `@ghuri/core`,
+`@ghuri/orm`, `@ghuri/auth`, `@ghuri/oauth`; optional `@ghuri/admin`, `@ghuri/rest`.
+
+"Log in with GitHub / Google / Facebook…" with nothing to write but settings, like django-allauth's
+`socialaccount`: a provider catalog on top of `@ghuri/oauth`, models that link provider accounts to users,
+signup and account-linking rules, URLs, admin, and a JSON API for SPAs and mobile apps.
+
+```ts
+// settings.ts
+INSTALLED_APPS: [ContentTypesConfig, AuthConfig, SessionsConfig, SocialAuthConfig, …],
+SOCIALACCOUNT: {
+  PROVIDERS: {
+    github: { APP: { clientId: env.GITHUB_CLIENT_ID, secret: env.GITHUB_SECRET }, SCOPE: ['read:user', 'user:email'] },
+    google: { APP: { clientId: env.GOOGLE_CLIENT_ID, secret: env.GOOGLE_SECRET } },
+  },
+},
+// urls.ts
+path('accounts/', include(authUrls)),
+path('accounts/', include(socialUrls)),     // /accounts/github/login/, /accounts/github/login/callback/, …
+```
+```html
+<form method="post" action="/accounts/github/login/?next=/dashboard/">
+  <input type="hidden" name="csrfmiddlewaretoken" value="…"><button>Continue with GitHub</button>
+</form>
+```
+
+### 18.1 Providers
+
+Built in: `github`, `google`, `facebook`, `microsoft` (Entra ID, `common` or a tenant), `apple` (client secret is
+an ES256 JWT signed with the team key, created per request with WebCrypto), `discord`, `gitlab` (and self-hosted),
+`twitter` (X, OAuth 2.0 + PKCE), `linkedin` (OIDC), `slack` (OIDC), plus `openid_connect` for any OIDC issuer
+(Auth0, Okta, Keycloak, Cognito…), configured as several named apps. Each provider declares its `@ghuri/oauth`
+strategy, default scopes, profile mapping and **whether its email is verified** (GitHub: `/user/emails`
+primary + verified; Google/Microsoft/Apple/OIDC: `email_verified`; Facebook/Discord/X: per their fields, else
+unverified). Custom providers: `registerProvider(new MyProvider())`.
+
+Credentials come from settings (`PROVIDERS.<id>.APP`, usually from env) or from `SocialApp` rows managed in the
+admin (allauth's two ways); settings win.
+
+### 18.2 Models (app label `socialaccount`, allauth table names)
+
+- `SocialApp`: `provider`, `providerId` (for several OIDC apps), `name`, `clientId`, `secret`, `key`,
+  `settings` (JSON).
+- `SocialAccount`: `user` → `AUTH_USER_MODEL`, `provider`, `uid`, `lastLogin`, `dateJoined`, `extraData` (JSON,
+  the raw profile); unique `(provider, uid)`.
+- `SocialToken` (only when `STORE_TOKENS`): `app`, `account`, `token`, `tokenSecret` (refresh token),
+  `expiresAt`; encrypted at rest (AES-GCM, key from `SECRET_KEY`). `getAccessToken(account)` refreshes when
+  expired.
+
+### 18.3 The login flow
+
+`<provider>/login/` starts the flow on **POST** (CSRF-protected; GET shows a one-button confirm page unless
+`LOGIN_ON_GET`, which allauth also disables by default to stop login CSRF). `process=connect` links instead of
+logging in. On the callback:
+
+1. A `SocialAccount (provider, uid)` exists → update `extraData`/tokens, log its user in.
+2. The visitor is logged in and `process=connect` → link the account to them (refused if it belongs to someone
+   else).
+3. `EMAIL_AUTHENTICATION` (default off) and the provider says the email is **verified** and exactly one user has
+   that email → link and log in. Unverified emails never link to existing users.
+4. Otherwise sign up: if `AUTO_SIGNUP` and the adapter's `populateUser()` produces a valid user (unique
+   username derived from the profile, email unless it is taken) → create it with an unusable password, link,
+   log in. Else redirect to `signup/` (HTML form or JSON) to collect what is missing.
+
+The response is a redirect to `next` / `LOGIN_REDIRECT_URL`, or for SPAs (`LOGIN_RESPONSE: 'jwt'`) a redirect to
+`FRONTEND_URL` with a one-time code that `POST token/` exchanges for a JWT pair (tokens never travel in URLs).
+
+### 18.4 Adapter and signals
+
+`SOCIALACCOUNT.ADAPTER` (class extending `SocialAccountAdapter`) customizes the flow, as in allauth:
+`isOpenForSignup(c, login)`, `preSocialLogin(c, login)` (may throw `ImmediateResponse(res)`), `populateUser`,
+`newUser`, `saveUser`, `isAutoSignupAllowed`, `getConnectRedirectUrl`, `authenticationError`. Signals:
+`preSocialLogin`, `socialAccountAdded`, `socialAccountUpdated`, `socialAccountRemoved`.
+
+### 18.5 URLs (`socialUrls`)
+
+| Route | |
+|---|---|
+| `providers/` | JSON list of configured providers with login URLs (for SPA buttons). |
+| `<provider>/login/` | Start login (POST; GET confirm page). `?next=`, `?process=connect`. |
+| `<provider>/login/callback/` | OAuth callback. |
+| `<provider>/token/` | **Mobile / native SDKs:** `POST { access_token \| id_token }` obtained by the app itself (Google Sign-In, Sign in with Apple); verified with the provider, then the same steps as the callback. |
+| `token/` | Exchange the one-time code from an SPA redirect for a JWT pair. |
+| `signup/` | Finish a signup that needs input. |
+| `connections/` | List (GET) and disconnect (POST) the user's social accounts. Disconnecting the last login method of a user without a usable password is refused. |
+
+### 18.6 Admin, REST, settings
+
+Admin registers `SocialApp`, `SocialAccount`, `SocialToken` (secrets masked) when `@ghuri/admin` is installed.
+`@ghuri/socialauth/rest` offers the same endpoints as DRF-style views for API-first projects.
+
+```ts
+SOCIALACCOUNT: {
+  PROVIDERS: { <id>: { APP?, SCOPE?, AUTH_PARAMS?, VERIFIED_EMAIL?, … } },
+  ADAPTER: SocialAccountAdapter,
+  AUTO_SIGNUP: true, EMAIL_AUTHENTICATION: false, EMAIL_REQUIRED: false,
+  LOGIN_ON_GET: false, STORE_TOKENS: false,
+  LOGIN_RESPONSE: 'session',          // or 'jwt' (needs FRONTEND_URL)
+  FRONTEND_URL: undefined,
+}
+```
+
+### 18.7 Testing
+
+`@ghuri/socialauth/testing`: `socialLogin(client, 'github', { id: '1', email: 'a@x.dev', emailVerified: true })`
+runs the whole flow against a mocked provider (`@ghuri/oauth/testing`) and leaves the client logged in.
+
+### 18.8 Phases
+
+1. `@ghuri/oauth` (strategies, `authenticate`, state cookie, OIDC validation, testing) and `@ghuri/socialauth`
+   with GitHub, Google, Facebook, Microsoft, Discord, GitLab, generic OIDC, models, flow, adapter, URLs, admin,
+   SPA/JWT and native-token endpoints.
+2. Apple, X, LinkedIn, Slack; `@ghuri/rest` views; refresh-token helpers; email confirmation for unverified
+   signups (with a future `@ghuri/mail`).
