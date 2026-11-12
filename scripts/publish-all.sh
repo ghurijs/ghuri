@@ -21,7 +21,10 @@ for p in "${ORDER[@]}"; do
   fi
   echo "publishing $name@$version --tag $TAG"
   log=$(mktemp)
-  if ! (cd "packages/$p" && npm publish --access public --tag "$TAG" --auth-type=web 2>&1 | tee "$log"; exit "${PIPESTATUS[0]}"); then
+  # npm's browser approval only runs when its stdin and stdout are a terminal (lib/utils/auth.js otplease):
+  # piping stdout makes it fail with EOTP. Keep stdout on the terminal and copy only stderr to the log.
+  if ! (cd "packages/$p" && npm publish --access public --tag "$TAG" --auth-type=web 2> >(tee "$log" >&2)); then
+    sleep 1 # let tee finish writing the log
     # npm holds a fresh upload as "staged" for several minutes: `npm view` says 404 but a re-publish gets 409.
     if grep -q 'previously staged version' "$log"; then
       echo "skip $name@$version (staged by an earlier run; npm will show it within ~20 minutes)"
