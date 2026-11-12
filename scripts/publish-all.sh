@@ -5,6 +5,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TAG="${1:-next}"
+if [ ! -t 0 ]; then
+  echo "publish-all.sh needs an interactive terminal: npm's browser approval (--auth-type=web) can't run here,"
+  echo "so npm would fail with EOTP. Type the command into a terminal window yourself and press Enter at each prompt."
+  exit 1
+fi
 ORDER=(core orm storage auth rest admin agents graphql realtime oauth socialauth cli create-ghuri)
 npm whoami >/dev/null || { echo "Run: npm login"; exit 1; }
 npm run build
