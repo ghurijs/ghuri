@@ -1,6 +1,17 @@
-# Ghuri
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img alt="Ghuri" src="assets/logo-light.svg" width="320">
+  </picture>
+</p>
 
-**Django for TypeScript. Cloudflare first, portable everywhere.**
+<h3 align="center">Django for TypeScript. Cloudflare first, portable everywhere.</h3>
+
+<p align="center">
+  <a href="https://ghurijs.github.io/docs/">Documentation</a> ·
+  <a href="https://ghurijs.github.io/docs/tutorial/part-1-models/">Tutorial</a> ·
+  <a href="https://github.com/ghurijs/examples">Examples</a>
+</p>
 
 Ghuri gives you Django's structure — settings, installed apps, models with managers, migrations,
 `urls.ts`, class-based views, an admin, a REST framework, GraphQL — written in TypeScript and built on
