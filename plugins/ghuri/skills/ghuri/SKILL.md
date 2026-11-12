@@ -1,11 +1,11 @@
 ---
 name: ghuri
-description: Write correct code for Ghuri, the Django-style TypeScript framework (Hono + Drizzle, Cloudflare Workers with D1/R2 by default, Node + Postgres too). Use whenever package.json depends on @ghuri/* packages (@ghuri/core, @ghuri/orm, @ghuri/auth, @ghuri/rest, @ghuri/admin, @ghuri/graphql, @ghuri/realtime, @ghuri/storage, @ghuri/agents, @ghuri/oauth, @ghuri/socialauth, @ghuri/cli), files import from them, package.json has a "ghuri" key or `ghuri` scripts, or the user mentions Ghuri. Covers models, queries, migrations, settings, URLs, views, middleware, REST serializers/viewsets/routers, admin, auth, permissions, social login (GitHub/Google/OIDC, allauth-style), OAuth/OIDC/magic-link login strategies (Passport-style), GraphQL, WebSockets, file storage, AI agents/MCP, signals, cache, cron/queues, management commands, tests and deployment. Ghuri is NOT Python Django, DRF, Prisma or plain Hono, even though names look like Django's; do not write Python or snake_case APIs.
+description: Write correct code for Ghuri, the Django-style TypeScript framework (Hono + Drizzle, Cloudflare Workers with D1/R2 by default, Node + Postgres too). Use whenever package.json depends on @ghuri/* packages (@ghuri/core, @ghuri/orm, @ghuri/auth, @ghuri/rest, @ghuri/admin, @ghuri/graphql, @ghuri/realtime, @ghuri/storage, @ghuri/agents, @ghuri/oauth, @ghuri/socialauth, @ghuri/mail, @ghuri/tenants, @ghuri/cli), files import from them, package.json has a "ghuri" key or `ghuri` scripts, or the user mentions Ghuri. Covers models, queries, migrations, settings, URLs, views, middleware, REST serializers/viewsets/routers, admin, auth, permissions, social login (GitHub/Google/OIDC), OAuth/OIDC/magic-link login strategies (Passport-style), GraphQL, WebSockets, file storage, email, multi-tenancy/SaaS, AI agents/MCP, signals, cache, cron/queues, management commands, tests and deployment. Ghuri is NOT Python Django, DRF, Prisma or plain Hono, even though names look like Django's; do not write Python or snake_case APIs.
 ---
 
 # Ghuri
 
-Ghuri is "Django for TypeScript": `settings.ts` with `INSTALLED_APPS`, apps with models, migrations, `urls.ts`, class-based views, an admin, a DRF-style REST framework, graphene-style GraphQL, Channels-style WebSockets, file storage, auth and AI agents. It is built on Hono and Drizzle and runs on Cloudflare Workers (D1, R2, KV, Queues, Durable Objects) by default, and on Node with Postgres with the same code.
+Ghuri is "Django for TypeScript": `settings.ts` with `INSTALLED_APPS`, apps with models, migrations, `urls.ts`, class-based views, an admin, a DRF-style REST framework, graphene-style GraphQL, Channels-style WebSockets, file storage, `django.core.mail`-style email, shared-schema multi-tenancy, auth and AI agents. It is built on Hono and Drizzle and runs on Cloudflare Workers (D1, R2, KV, Queues, Durable Objects) by default, and on Node with Postgres with the same code.
 
 It is brand new, so your instincts are wrong in predictable ways: the names are Django's, but the syntax is TypeScript, options are camelCase, everything that touches the database is `async`, and nothing is discovered by file name. Read the reference file for the area you touch before writing code (index at the bottom).
 
@@ -44,6 +44,7 @@ It is brand new, so your instincts are wrong in predictable ways: the names are 
 | `ModelViewSet`, `perform_create`, `@action(detail=True)` | `ModelViewSet<Post>`, `async performCreate(serializer)`, `@action({ detail: true })` |
 | `IsAuthenticated \| IsAdminUser` | `IsAuthenticated.or(IsAdminUser)` |
 | `class PostAdmin(admin.ModelAdmin): list_display = (...)` | `class PostAdmin extends ModelAdmin<Post> { listDisplay = [...] }` |
+| `send_mail(subject, message, from_email, [to])` | `await sendMail(subject, message, fromEmail, [to])` (`@ghuri/mail`) |
 | `@receiver(post_save, sender=Post)` | `postSave.connect(async ({ instance, created }) => {...}, { sender: Post })` |
 | Celery / cron | `onQueue('emails', fn)` / `onSchedule('0 3 * * *', fn)` (`@ghuri/core`) + wrangler config |
 | `TestCase`, `self.client` | Vitest via `npx ghuri test`, `setupTestDatabase()`, `APIClient` |
@@ -111,6 +112,12 @@ It is brand new, so your instincts are wrong in predictable ways: the names are 
 **Add an AI agent / MCP endpoint** (agents.md)
 `AgentsConfig` in `INSTALLED_APPS`, `AGENTS: { DEFAULT_MODEL: 'workers-ai:...' }`; `class SupportAgent extends Agent { instructions = '...'; tools = [new ModelTools(Post, {...})] }` plus `@tool({ description, input: z.object({...}) })` methods; `const agents = new AgentRouter(); agents.register('support', SupportAgent)`; `path('agents/', include(agents.urls))` and `path('mcp/', agents.mcp({ name, version, tools }))`. MCP auth = REST authentication classes (token header, no OAuth).
 
+**Send email** (mail.md)
+`npm install @ghuri/mail@next`; in settings `EMAIL_BACKEND: cloudflareEmailBackend({ binding: 'EMAIL' })` (plus `"send_email": [{ "name": "EMAIL" }]` in `wrangler.jsonc`) or `resendBackend({ apiKey: env.RESEND_API_KEY })`, and `DEFAULT_FROM_EMAIL`; `smtpBackend()` from `@ghuri/mail/smtp` on Node only. Send with `await sendMail('Welcome', text, null, [user.email], { htmlMessage })` or `new EmailMultiAlternatives(...)`; slow or bulk mail from an `onQueue` consumer. Test with `useOutbox()` / `outbox` from `@ghuri/mail/testing`.
+
+**Make the app multi-tenant** (tenants.md)
+`npm install @ghuri/tenants@next`; keep the tenant (`Store`, `Organization`) a plain `Model`; `export const StoreModel = tenantModel({ field: 'store', to: () => Store, uuidPk: true })` and build every tenant-owned model with `StoreModel({...})` (unique constraints start with `'store'`); `TenantMiddleware` in `MIDDLEWARE` and `TENANTS: { MODEL: 'stores.Store', RESOLVERS: [new SubdomainResolver({ domain }), new HostResolver()] }`; `makemigrations` + `migrate`. Queries then filter to the request's tenant and throw `TenantNotSet` with none; background jobs use `runAsTenant(store, fn)`, platform code `withoutTenant(fn)` / `Model.unscoped`. Check membership in a permission class; prove isolation with `assertTenantIsolation()` from `@ghuri/tenants/testing`.
+
 **Deploy to Cloudflare** (deployment.md)
 `npx wrangler d1 create <name>` and paste `database_id`; `npx wrangler r2 bucket create <bucket>`; `npx wrangler secret put SECRET_KEY`; `npx ghuri check --deploy`; `npx ghuri deploy --migrate` (or `npx ghuri migrate --remote` then `wrangler deploy`). Keep `nodejs_compat`.
 
@@ -133,6 +140,8 @@ Add `pg: postgres({ url: env.DATABASE_URL })` (or `{ hyperdrive: 'HYPERDRIVE' }`
 - Expecting templates, forms, `{% csrf_token %}`, `render(request, 'x.html')`, Celery, `squashmigrations`, `inspectdb`, multi-table inheritance, proxy models, DB routers, i18n or GraphQL subscriptions: they don't exist. Use Hono JSX, serializers, queues.
 - `DecimalField` values are strings, `DurationField` is milliseconds, `DateField`/`TimeField` are strings; only `DateTimeField` is a `Date`.
 - Storing per-connection data on `this` in a consumer (rebuilt per event: use `this.state`); `memoryLayer()` on Workers.
+- Email: `sendMail({ to, subject, html })` or `sendMail(to, subject, body)` (the order is `subject, message, fromEmail, recipientList, options`), `EMAIL_BACKEND` as a string, `attachFile()`, nodemailer, or `@ghuri/mail/smtp` in Worker code.
+- Multi-tenancy: a hand-made `ForeignKey(() => Store)` on a plain `Model()` instead of the `tenantModel()` factory (not scoped); calling `objects` in platform code with no tenant (throws `TenantNotSet`: use `withoutTenant()` / `unscoped`); treating the resolved tenant as proof the user may access it; schema-per-tenant (django-tenants) does not exist.
 - Importing `CharField` from `@ghuri/orm` into a serializer (use `@ghuri/rest`), or token/JWT auth from `@ghuri/rest` (use `@ghuri/auth/rest`).
 
 ## Reference files (read before working in that area)
@@ -150,6 +159,8 @@ Add `pg: postgres({ url: env.DATABASE_URL })` (or `{ hyperdrive: 'HYPERDRIVE' }`
 | references/graphql.md | `ModelType`, `Query`/`Mutation`, Relay connections and filters, `SerializerMutation`, `GraphQLView` |
 | references/realtime.md | WebSocket consumers, rooms, `channelLayer`, Durable Objects setup, socket auth |
 | references/storage.md | `FileField`/`ImageField`, storage backends (R2/S3/fs/memory), uploads, serving media |
+| references/mail.md | sending email: `sendMail`, `EmailMessage`, attachments/HTML, `EMAIL_BACKEND` (Cloudflare Email, Resend, SMTP, console), custom backends, `outbox` tests |
+| references/tenants.md | multi-tenant / SaaS apps: `tenantModel()`, `objects` vs `unscoped`, `runAsTenant`/`withoutTenant`, `TenantMiddleware` + resolvers, `TENANTS`, write checks, `tenantCache`, leak tests |
 | references/agents.md | `Agent`, `@tool`, `ModelTools`/`ViewSetTools`/`RouterTools`, `AgentRouter`, MCP endpoints, providers |
 | references/signals-cache-tasks-commands.md | signals, cache API, cron (`onSchedule`) and queues (`onQueue`), custom management commands |
 | references/testing.md | writing or running tests, test databases, `APIClient`, test client, query counting |

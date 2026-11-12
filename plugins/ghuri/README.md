@@ -2,7 +2,7 @@
 
 The official agent skill for [Ghuri](https://github.com/ghurijs/ghuri), the Django-style TypeScript framework (Hono + Drizzle, Cloudflare Workers with D1/R2 by default, Node + Postgres too).
 
-Ghuri is new, so coding agents fall back to Python Django, DRF, Prisma or plain Hono when they write it. This skill teaches them the real APIs: models and queries, migrations, settings, URLs and views, the REST framework, admin, auth, GraphQL, WebSockets, file storage, AI agents and MCP, signals, cache, cron and queues, management commands, tests and deployment.
+Ghuri is new, so coding agents fall back to Python Django, DRF, Prisma or plain Hono when they write it. This skill teaches them the real APIs: models and queries, migrations, settings, URLs and views, the REST framework, admin, auth, GraphQL, WebSockets, file storage, email, multi-tenancy, AI agents and MCP, signals, cache, cron and queues, management commands, tests and deployment.
 
 What's inside:
 

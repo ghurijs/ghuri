@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "Official Claude Code plugins for Ghuri, the Django-style TypeScript framework for Cloudflare Workers and Node.",
-    "version": "0.1.0-alpha.2"
+    "version": "0.1.0-alpha.3"
   },
   "plugins": [
     {
       "name": "ghuri",
       "source": "./plugins/ghuri",
-      "description": "Teaches Claude to write correct Ghuri code (models, migrations, views, REST, admin, auth, GraphQL, WebSockets, storage, agents, tests, deployment) and connects the project's `ghuri mcp` dev server.",
-      "version": "0.1.0-alpha.2",
+      "description": "Teaches Claude to write correct Ghuri code (models, migrations, views, REST, admin, auth, GraphQL, WebSockets, storage, email, multi-tenancy, agents, tests, deployment) and connects the project's `ghuri mcp` dev server.",
+      "version": "0.1.0-alpha.3",
       "category": "development",
       "tags": [
         "ghuri",

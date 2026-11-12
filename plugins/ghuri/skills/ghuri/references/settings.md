@@ -95,6 +95,8 @@ Several aliases are allowed (`DATABASES: { default: d1('DB'), pg: postgres({ url
 | `GRAPHQL` | `@ghuri/graphql` | graphql.md |
 | `REALTIME` | `@ghuri/realtime` | realtime.md |
 | `AGENTS` | `@ghuri/agents` | agents.md |
+| `EMAIL_BACKEND`, `DEFAULT_FROM_EMAIL`, `SERVER_EMAIL`, `EMAIL_SUBJECT_PREFIX`, `ADMINS`, `MANAGERS`, `EMAIL_TIMEOUT`, `EMAIL_HOST*`, `EMAIL_PORT`, `EMAIL_USE_TLS`/`SSL` | `@ghuri/mail` | mail.md |
+| `TENANTS` (`MODEL`, `RESOLVERS`, `REQUIRED`) | `@ghuri/tenants` | tenants.md |
 | `ADMIN_ASSETS` | `@ghuri/admin` | admin.md |
 
 ## Reading settings and env at runtime

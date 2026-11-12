@@ -1,6 +1,6 @@
 # Testing
 
-Covers `ghuri test` (Vitest), the vitest config, test databases (`@ghuri/orm/testing`), the app test client (`@ghuri/core/testing`), `APIClient` (`@ghuri/rest/testing`), GraphQL/WebSocket helpers, query counting, commands, cron/queue handlers.
+Covers `ghuri test` (Vitest), the vitest config, test databases (`@ghuri/orm/testing`), the app test client (`@ghuri/core/testing`), `APIClient` (`@ghuri/rest/testing`), GraphQL/WebSocket helpers, the email outbox, tenant isolation, query counting, commands, cron/queue handlers.
 
 ## Django/DRF habit -> Ghuri
 
@@ -20,6 +20,8 @@ Covers `ghuri test` (Vitest), the vitest config, test databases (`@ghuri/orm/tes
 | `call_command('x', y=1)` | `await callCommand('x', { y: 1 }, bufferIO())` |
 | `GraphQLTestCase.query()` | `graphqlQuery(client, query, { variables })` |
 | Channels `WebsocketCommunicator` | `WebSocketCommunicator` from `@ghuri/realtime/testing` |
+| `mail.outbox` | `outbox` + `useOutbox()` / `restoreEmailBackend()` from `@ghuri/mail/testing` |
+| django-scopes `scope(...)` in tests | `runAsTenant(t, fn)` / `activateTenant(t)`; `assertTenantIsolation()` from `@ghuri/tenants/testing` |
 
 ## vitest.config.ts
 
@@ -221,6 +223,34 @@ await ws.disconnect()
 ```
 
 Also `sendText`, `sendBytes`, `receiveFrom`, `receiveClose`. See the realtime reference for consumers.
+
+## Email (`@ghuri/mail/testing`)
+
+```ts
+import { outbox, restoreEmailBackend, useOutbox } from '@ghuri/mail/testing'
+
+beforeEach(() => useOutbox())            // every message goes to `outbox`, whatever EMAIL_BACKEND says
+afterEach(() => restoreEmailBackend())
+
+it('emails the author', async () => {
+  await api.post('/api/posts/1/publish/', {}, { format: 'json' })
+  expect(outbox).toHaveLength(1)
+  expect(outbox[0].to).toEqual(['jane@example.com'])
+  expect(outbox[0].subject).toContain('published')
+})
+```
+
+## Tenant isolation (`@ghuri/tenants/testing`)
+
+```ts
+import { runAsTenant } from '@ghuri/tenants'
+import { assertTenantIsolation } from '@ghuri/tenants/testing'
+
+await runAsTenant(storeA, () => Product.objects.create({ title: 'Shirt', handle: 'shirt' }))  // fixtures per tenant
+await assertTenantIsolation({ tenants: [storeA, storeB], run: () => listOrdersForDashboard() }) // throws TenantLeakError
+```
+
+Requests resolve the tenant through `TenantMiddleware`: send the header or `Host` your resolvers read. See tenants.md.
 
 ## Commands, cron, queues, signals
 
