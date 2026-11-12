@@ -783,3 +783,39 @@ disable FKs); `sqlmigrate --all` SQL files record their own `ghuri_migrations` r
 100,000 iterations (higher counts verified via JS fallback and rehashed on login). REST auth classes in `@ghuri/auth/rest`.
 
 **storage** (as built): `FieldFile.toJSON()` returns the stored name; assign uploads with `upload(file)`; `presignedUrl()` (S3 only).
+
+---
+
+## 15. `@ghuri/graphql` (graphene-django style)
+
+```ts
+import { ModelType, Query, Mutation, Schema, Field, List, ID, SerializerMutation, GraphQLView } from '@ghuri/graphql'
+
+class PostType extends ModelType {
+  static Meta = { model: Post, fields: ['id', 'title', 'body', 'author', 'tags', 'createdAt'], filterFields: { title: ['icontains'], published: ['exact'] }, interfaces: [Node] }
+  static fields = { excerpt: Field(String, { resolve: (post) => post.body.slice(0, 100) }) }
+}
+class BlogQuery extends Query {
+  static fields = {
+    posts: List(PostType, { resolve: () => Post.objects.filter({ published: true }) }),
+    post: Field(PostType, { args: { id: ID }, resolve: (_, { id }) => Post.objects.get({ id }) }),
+    allPosts: ConnectionField(PostType),          // Relay connection + filters + ordering
+  }
+}
+class CreatePost extends SerializerMutation { static Meta = { serializerClass: PostSerializer, permissionClasses: [IsAuthenticated] } }
+class BlogMutation extends Mutation { static fields = { createPost: CreatePost.field() } }
+
+export const schema = new Schema({ query: [BlogQuery], mutation: [BlogMutation] })   // merges app query classes
+// urls.ts
+path('graphql/', GraphQLView.asView({ schema, graphiql: true }))
+```
+- Code-first on `graphql` (graphql-js v17, peer dependency so there is one instance). Types are generated from ORM
+  `_meta` / `Field` (`internalType` → GraphQL scalar, choices → enums, FK/M2M/reverse → object/list fields).
+- N+1 safety: per-request DataLoaders for FK, reverse FK and M2M; optional `selectRelated`/`prefetchRelated` optimizer from the query AST.
+- Relay: `Node` interface, global IDs, `ConnectionField` with cursor pagination, `filterFields` (ORM lookups as args), `orderBy`.
+- Mutations: `SerializerMutation` / `ModelMutation` reusing `@ghuri/rest` serializers + permission classes (rest is an optional peer);
+  errors returned as `errors: [{ field, messages }]` payload like graphene-django.
+- Auth: request user from core `getUser(c)`; REST authentication classes usable via `GraphQLView.authenticationClasses`; `loginRequired`/`permissionRequired` resolver wrappers.
+- HTTP: GraphQL-over-HTTP (GET for queries, POST JSON, `application/graphql-response+json`), GraphiQL from CDN when enabled, CSRF exemption only with token auth, depth/complexity limits, persisted query hook, introspection toggle.
+- Settings `GRAPHQL: { SCHEMA, GRAPHIQL, MAX_DEPTH, MAX_COMPLEXITY, INTROSPECTION }`; command `graphql_schema` (prints SDL).
+- Subscriptions are out of scope for 0.1 (later via Durable Objects).
