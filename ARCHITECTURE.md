@@ -48,6 +48,7 @@ One GitHub repo per package under `github.com/ghurijs`. npm scope `@ghuri`. All 
 | `graphql` | `@ghuri/graphql` | graphene-django-style GraphQL: model types, Relay connections and filters, serializer mutations, `GraphQLView` (section 15) | core, orm, `graphql`, (optional) rest |
 | `realtime` | `@ghuri/realtime` | Channels-style WebSocket consumers, rooms (Durable Objects on Workers, in-process on Node), channel layer, test communicator | core, (optional) auth, rest |
 | `oauth` | `@ghuri/oauth` | Passport.js-style strategies: OAuth2, OIDC, local, magic link, bearer; `authenticate()` views (section 17) | core, auth |
+| `oauth-provider` | `@ghuri/oauth-provider` | django-oauth-toolkit-style OAuth 2.1 authorization server: PKCE, rotating refresh tokens, CIMD + dynamic registration, RFC 8707 JWT access tokens, admin; the authorization server for MCP (section 19) | core, orm, auth, oauth, (optional) rest, admin |
 | `socialauth` | `@ghuri/socialauth` | django-allauth-style social login: providers, `SocialAccount`, signup/linking, admin (section 18) | core, orm, auth, oauth |
 | `mail` | `@ghuri/mail` | `django.core.mail` clone: `sendMail`, `EmailMessage`, backends (Cloudflare Email Service, Resend, SMTP in `@ghuri/mail/smtp`, console, locmem, dummy), test outbox | core |
 | `tenants` | `@ghuri/tenants` | Shared-schema multi-tenancy: `tenantModel()` factories, fail-closed tenant QuerySets, write checks, `TenantMiddleware` + resolvers, `tenantCache()`, leak tests | core, orm, `hono` |
@@ -1416,3 +1417,72 @@ runs the whole flow against a mocked provider (`@ghuri/oauth/testing`) and leave
 - **`@ghuri/auth` 0.1.0-alpha.2** exports `migrationsForUserModel`, so `socialaccount`'s migration follows
   `AUTH_USER_MODEL`.
 - Not yet (phase 2): Apple, X, LinkedIn, Slack; `@ghuri/rest` views; email confirmation for unverified signups.
+
+---
+
+## 19. `@ghuri/oauth-provider` and MCP authorization (as built)
+
+Goal: any Ghuri app can host a remote MCP server that Claude.ai, ChatGPT, Claude Code and Codex connect to with OAuth,
+portably (D1 / Postgres / SQLite, Workers / Node). Follows the MCP authorization spec of revision 2026-07-28, OAuth 2.1,
+RFC 8414, 7591, 7009, 8707, 9068, 9207, 9728, 8252 §7.3 and the Client ID Metadata Document draft. A separate package
+from `@ghuri/oauth` (clients) the way django-oauth-toolkit is separate from allauth: it brings models, migrations and
+optional `@ghuri/rest` / `@ghuri/admin` integration that login-only apps should not carry.
+
+### 19.1 `@ghuri/oauth-provider`
+
+- **App** `OAuth2ProviderConfig`, label `oauth2_provider`, settings `OAUTH2_PROVIDER`, tables `oauth2_provider_*`,
+  command `cleartokens` (django-oauth-toolkit names). Migration follows `AUTH_USER_MODEL` (`migrationsForUserModel`).
+- **Models:** `Application` (client; `registrationType` manual / dynamic / metadata_document; whitespace-separated
+  `redirectUris` and `grantTypes`; `clientSecret` is `sha256$<b64url>`), `Grant`, `AuthorizationCode`, `RefreshToken`.
+  **Deliberate difference:** django-oauth-toolkit's `Grant` is the authorization code; here `Grant` is the user's
+  consent (user × client × scope × resource × `props`, `revoked`), the unit of revocation, and the code is
+  `AuthorizationCode`. There is no `AccessToken` model.
+- **Tokens:** access tokens are RFC 9068 JWTs (`typ: at+jwt`; `iss`, `sub`, `aud` = canonical resource, `client_id`,
+  `scope`, `jti`, `iat`, `exp`, `gid` = grant). Default HS256 with a key derived by HKDF from `SECRET_KEY` (fallbacks
+  verify); ES256 / RS256 / EdDSA with `ACCESS_TOKEN_SIGNING_KEY` (JWK) and `/.well-known/jwks.json`.
+  `verifyAccessToken(token, { audience })` also checks the grant is active (`CHECK_GRANT_ON_ACCESS`, one indexed query),
+  so revocation is immediate. Codes (60 s, single use via conditional `UPDATE`; replay revokes the grant) and refresh
+  tokens (rotated on every use; reuse revokes the grant; `REFRESH_TOKEN_GRACE_PERIOD_SECONDS`) are stored as SHA-256
+  hashes. Revoking any token (RFC 7009) revokes its grant.
+- **Endpoints:** `oauth2ProviderUrls` (namespace `oauth2_provider`: `authorize`, `token`, `revoke-token`, `register`) and
+  `oauth2WellKnownUrls` (RFC 8414 metadata at `/.well-known/oauth-authorization-server[/<issuer path>]`, JWKS). PKCE
+  `S256` only; `iss` on every authorization response; errors before the client and redirect URI are verified render a
+  page and never redirect; token / revoke / register are CSRF-exempt, form-encoded (register: JSON), `no-store`, CORS
+  `*`. Issuer = `ISSUER` or the request origin. Resource indicators are canonicalised (lowercase scheme / host, no
+  default port, fragment or trailing slash) and limited to the issuer's origin unless `RESOURCES` says otherwise
+  (`invalid_target`).
+- **Consent:** default server-rendered page (client name, scopes, redirect host, loopback warning, `X-Frame-Options:
+  DENY`, CSRF) or `CONSENT_HANDLER` / `authorizationView({ consent })`, which gets `{ request, client, user, scopes,
+  pending, action, form, approve({ scope, props }), deny() }`. The pending request round-trips sealed (AES-GCM,
+  `seal()` from `@ghuri/oauth`) and bound to the user. Auto-approval when an active grant covers the scopes
+  (`REQUEST_APPROVAL_PROMPT: 'auto'`) or `skipAuthorization`.
+- **Clients:** CIMD for `https://` client ids with a path (exact `client_id` match, `none` auth, https / loopback
+  redirect URIs; https only on 443, no IP literals / localhost / single-label / internal suffixes, no redirects, 5 KB,
+  5 s; cached as `Application` rows by `Cache-Control`, clamped 5 min – 24 h; `CLIENT_METADATA_ALLOWED_HOSTS`,
+  `CLIENT_METADATA_POLICY`). Workers cannot resolve DNS before fetching, so DNS-rebinding to private addresses is not
+  detectable there; the allowlist is the mitigation. RFC 7591 registration (`ALLOW_DYNAMIC_REGISTRATION`, per-IP
+  `REGISTRATION_RATE` on the default cache; `grant_types` defaults to code + refresh). Loopback redirect URIs match on
+  any port; everything else is an exact string match.
+- **Integrations:** `@ghuri/oauth-provider/rest` (`OAuth2Authentication` with an `audience`, `TokenHasScope` +
+  `requiredScopes`), `@ghuri/oauth-provider/admin` (revoke-grants action; hashes never shown).
+- `@ghuri/oauth` now exports `sha256` and `timingSafeEqual` for it.
+
+### 19.2 `@ghuri/agents` OAuth mode and protocol 2026-07-28
+
+- `McpServer({ oauth: { verifyAccessToken, authorizationServers?, resource?, scopesSupported?, requiredScopes?,
+  impliedScopes?, hideUnauthorizedTools?, resourceName?, resourceDocumentation? } })`. The verifier is a plain function
+  (`@ghuri/agents` does not depend on `@ghuri/oauth-provider`). The audience is the canonical MCP URL of the request
+  (or `resource`).
+- `server.wellKnownUrls` / `mcpWellKnownUrls(...servers)`: RFC 9728 metadata at `/.well-known/oauth-protected-resource`
+  and `/.well-known/oauth-protected-resource/<mcp path>` (a suffix is served only when it routes to that server).
+- 401 `WWW-Authenticate: Bearer resource_metadata="…", scope="<requiredScopes>"` (`error="invalid_token"` when a token
+  was presented); 403 `error="insufficient_scope", scope="<granted ∪ needed>"` for tools (and `requiredScopes`) the
+  token does not cover. Tools carry `scopes` (`tool({ scopes })`, toolkit option `scopes`, `requireScopes()`); hidden
+  from `tools/list` unless `hideUnauthorizedTools: false`.
+- Protocol: `2026-07-28` is served next to the legacy revisions on one endpoint (dual-era). A request is modern when its
+  `MCP-Protocol-Version` header is ≥ 2026-07-28 or its `_meta` carries `io.modelcontextprotocol/protocolVersion`.
+  Modern requests: no `initialize` / session; `_meta` version + client capabilities required (`-32602`, 400); header
+  checks (`-32020`, 400; `=?base64?…?=` decoded); unsupported version `-32022` (400, `data.supported` / `requested`);
+  `server/discover`; `resultType: 'complete'` and `serverInfo` in `_meta`; `ttlMs` / `cacheScope` on lists (`private`
+  in OAuth mode); unknown or removed methods (`ping`, `logging/setLevel`) 404 / `-32601`; batches refused. `initialize`
+  negotiates the newest legacy revision (`2025-11-25`). No SSE (subscriptions/listen, MRTR, tasks not implemented).
