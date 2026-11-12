@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TAG="${1:-next}"
-ORDER=(core orm storage auth rest admin agents graphql realtime cli create-ghuri)
+ORDER=(core orm storage auth rest admin agents graphql realtime oauth socialauth cli create-ghuri)
 npm whoami >/dev/null || { echo "Run: npm login"; exit 1; }
 npm run build
 for p in "${ORDER[@]}"; do

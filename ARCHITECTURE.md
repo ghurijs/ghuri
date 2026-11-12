@@ -46,8 +46,8 @@ One GitHub repo per package under `github.com/ghurijs`. npm scope `@ghuri`. All 
 | `admin` | `@ghuri/admin` | Django-admin clone (SSR with Hono JSX + htmx) | core, orm, auth, (optional) storage |
 | `agents` | `@ghuri/agents` | Agent classes, model/viewset tools, conversation memory, MCP server | core, orm, rest, `ai` |
 | `realtime` | `@ghuri/realtime` | Channels-style WebSocket consumers, rooms (Durable Objects on Workers, in-process on Node), channel layer, test communicator | core, (optional) auth, rest |
-| `oauth` | `@ghuri/oauth` | Passport.js-style strategies: OAuth2, OIDC, local, magic link, bearer; `authenticate()` views (planned, section 17) | core, auth |
-| `socialauth` | `@ghuri/socialauth` | django-allauth-style social login: providers, `SocialAccount`, signup/linking, admin (planned, section 18) | core, orm, auth, oauth |
+| `oauth` | `@ghuri/oauth` | Passport.js-style strategies: OAuth2, OIDC, local, magic link, bearer; `authenticate()` views (section 17) | core, auth |
+| `socialauth` | `@ghuri/socialauth` | django-allauth-style social login: providers, `SocialAccount`, signup/linking, admin (section 18) | core, orm, auth, oauth |
 | `cli` | `@ghuri/cli` | `ghuri` binary (`startproject`, `startapp`, `runserver`, `migrate`, …) | core, orm |
 | `create-ghuri` | `create-ghuri` | `npm create ghuri@latest` → runs `startproject` | — |
 | `docs` | — | Starlight docs site | — |
@@ -1120,7 +1120,7 @@ DO RPC) is tested end to end; it joins the portability matrix (12) for Workers a
 
 ## 17. `@ghuri/oauth` (Passport.js-style strategies)
 
-Status: **specified, not built.** Repo `ghurijs/oauth`, npm `@ghuri/oauth`, peers `@ghuri/core`, `@ghuri/auth`
+Status: **phase 1 built** (as-built notes in 17.7). Repo `ghurijs/oauth`, npm `@ghuri/oauth`, peers `@ghuri/core`, `@ghuri/auth`
 (login, sessions, signing, JWT pairs), `hono`.
 
 The building blocks for any login system: a **strategy** turns a request into "this is user X", "this
@@ -1234,11 +1234,27 @@ OAUTH: {
 requests (a `fetch` stub scoped to the test), and `client.followOAuth('/login/acme/')` runs the redirect →
 callback round trip through the test client.
 
+### 17.7 As built (supersedes 17.1–17.6 where they conflict)
+
+- **Results** gained `{ type: 'response', response }` (a strategy that answers itself, e.g. "we sent you a link").
+- **`verify` is required** for `OAuth2Strategy` / `OIDCStrategy`; it may return a user, `{ user, info }` or null.
+- **Login backend:** no `StrategyBackend`. `login()` stores the first `AUTHENTICATION_BACKENDS` entry that has
+  `getUser` (normally `ModelBackend`), which loads any user of `AUTH_USER_MODEL` by pk.
+- **Callback URL** defaults to the current request path, so one route serves both legs; `callbackURL` overrides it.
+  `AuthenticateOptions.next` overrides the `?next=` parameter.
+- **Magic links** are `<b64url pk>.<base36 ts>.<HMAC-SHA256>`; the MAC covers pk, password hash, `lastLogin` and email
+  (salt `ghuri.oauth.MagicLinkStrategy`), with `SECRET_KEY_FALLBACKS`.
+- **JWT:** RS256/384/512, PS256/384/512, ES256/384/512, EdDSA; HS* ID tokens are not accepted. JWKS cached an hour,
+  refetched at most once a minute on an unknown `kid`; 60 s leeway.
+- **Testing:** `followOAuth(client, startPath, provider, { deny?, method? })` is a function, not a client method; the
+  mock answers any token-endpoint POST (`anyTokenEndpoint`) so provider-specific URLs work with `routes`.
+- Verified on workerd: OIDC round trip (ES256 signing and verification, HKDF + AES-GCM state cookie, PKCE).
+
 ---
 
 ## 18. `@ghuri/socialauth` (django-allauth style social login)
 
-Status: **specified, not built.** Repo `ghurijs/socialauth`, npm `@ghuri/socialauth`, peers `@ghuri/core`,
+Status: **phase 1 built** (as-built notes in 18.9). Repo `ghurijs/socialauth`, npm `@ghuri/socialauth`, peers `@ghuri/core`,
 `@ghuri/orm`, `@ghuri/auth`, `@ghuri/oauth`; optional `@ghuri/admin`, `@ghuri/rest`.
 
 "Log in with GitHub / Google / Facebook…" with nothing to write but settings, like django-allauth's
@@ -1352,3 +1368,21 @@ runs the whole flow against a mocked provider (`@ghuri/oauth/testing`) and leave
    SPA/JWT and native-token endpoints.
 2. Apple, X, LinkedIn, Slack; `@ghuri/rest` views; refresh-token helpers; email confirmation for unverified
    signups (with a future `@ghuri/mail`).
+
+### 18.9 As built (supersedes 18.1–18.8 where they conflict)
+
+- **Native tokens:** `id_token` for OIDC providers (audience = client id or `settings.audiences`), `access_token` only
+  where the provider can confirm it was issued to us: GitHub (`POST /applications/{client_id}/token`) and Facebook
+  (`debug_token`). Discord refuses native tokens.
+- **Emails:** Microsoft (Entra ID) and Facebook emails are unverified unless `VERIFIED_EMAIL: true`.
+- **Pending signup** lives in an encrypted 10-minute cookie (`ghuri_social_signup`), not the session, so it works
+  for SPAs and sessionless setups.
+- **SPA codes** are sealed `{ uid, exp, jti }` (60 s); reuse is refused while the configured cache remembers the `jti`.
+- **CSRF:** `<provider>/token/` and `token/` are CSRF-exempt and accept JSON bodies only (cross-site forms can't send
+  JSON). Starting a login is a POST through `CsrfMiddleware`; GET shows a confirm page unless `LOGIN_ON_GET`.
+- **Errors** in browser flows redirect to `LOGIN_ERROR_URL` (new setting, default `LOGIN_URL`) with `?error=`, or to
+  `FRONTEND_URL#error=` in JWT mode; API flows answer `{ detail, code }`.
+- **Admin** is opt-in: `import '@ghuri/socialauth/admin'` registers the three models (`@ghuri/admin` is an optional peer).
+- **`@ghuri/auth` 0.1.0-alpha.2** exports `migrationsForUserModel`, so `socialaccount`'s migration follows
+  `AUTH_USER_MODEL`.
+- Not yet (phase 2): Apple, X, LinkedIn, Slack; `@ghuri/rest` views; email confirmation for unverified signups.

@@ -45,6 +45,8 @@ const recent = await Post.objects.filter({ author__username: 'rifat' }).orderBy(
 | [`@ghuri/rest`](https://github.com/ghurijs/rest) | serializers, viewsets, routers, permissions, pagination, OpenAPI |
 | [`@ghuri/graphql`](https://github.com/ghurijs/graphql) | GraphQL in graphene-django style: model types, Relay connections and filters, serializer mutations, GraphiQL |
 | [`@ghuri/realtime`](https://github.com/ghurijs/realtime) | WebSockets in Django Channels style: consumers in `urls.ts`, rooms on Durable Objects, `channelLayer` |
+| [`@ghuri/oauth`](https://github.com/ghurijs/oauth) | Passport.js-style login strategies: OAuth2, OpenID Connect, local, magic link, bearer |
+| [`@ghuri/socialauth`](https://github.com/ghurijs/socialauth) | Social login like django-allauth: GitHub, Google, Facebook, Microsoft, Discord, GitLab, any OIDC |
 | [`@ghuri/storage`](https://github.com/ghurijs/storage) | R2 / S3 / filesystem storage, `FileField` |
 | [`@ghuri/admin`](https://github.com/ghurijs/admin) | the Django admin, server-rendered on Workers |
 | [`@ghuri/agents`](https://github.com/ghurijs/agents) | AI agents with tools generated from your models and viewsets, MCP server |
@@ -61,6 +63,19 @@ npx ghuri makemigrations && npx ghuri migrate
 npx ghuri createsuperuser
 npm run dev
 ```
+
+## Building with AI coding agents
+
+Models have not seen Ghuri in training, so Ghuri ships what they need:
+
+- **`AGENTS.md` + `CLAUDE.md`** in every new project: layout, commands and the core APIs.
+- **The Ghuri skill**: in Claude Code, `/plugin marketplace add ghurijs/ghuri` then `/plugin install ghuri@ghuri`;
+  in Codex, Cursor and others, `npx skills add ghurijs/ghuri`.
+- **`ghuri mcp`**: an MCP server that lets the agent inspect your models, routes, settings and migrations and run
+  management commands. New projects register it in `.mcp.json`.
+- **[llms.txt](https://ghurijs.github.io/docs/llms.txt)**: the whole documentation as Markdown.
+
+See [AI-assisted development](https://ghurijs.github.io/docs/topics/ai-assisted-development/).
 
 ## This repository
 
