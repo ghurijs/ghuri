@@ -45,9 +45,12 @@ One GitHub repo per package under `github.com/ghurijs`. npm scope `@ghuri`. All 
 | `storage` | `@ghuri/storage` | Storage API, R2 / S3 / filesystem / memory backends, `FileField`/`ImageField` | core, orm |
 | `admin` | `@ghuri/admin` | Django-admin clone (SSR with Hono JSX + htmx) | core, orm, auth, (optional) storage |
 | `agents` | `@ghuri/agents` | Agent classes, model/viewset tools, conversation memory, MCP server | core, orm, rest, `ai` |
+| `graphql` | `@ghuri/graphql` | graphene-django-style GraphQL: model types, Relay connections and filters, serializer mutations, `GraphQLView` (section 15) | core, orm, `graphql`, (optional) rest |
 | `realtime` | `@ghuri/realtime` | Channels-style WebSocket consumers, rooms (Durable Objects on Workers, in-process on Node), channel layer, test communicator | core, (optional) auth, rest |
 | `oauth` | `@ghuri/oauth` | Passport.js-style strategies: OAuth2, OIDC, local, magic link, bearer; `authenticate()` views (section 17) | core, auth |
 | `socialauth` | `@ghuri/socialauth` | django-allauth-style social login: providers, `SocialAccount`, signup/linking, admin (section 18) | core, orm, auth, oauth |
+| `mail` | `@ghuri/mail` | `django.core.mail` clone: `sendMail`, `EmailMessage`, backends (Cloudflare Email Service, Resend, SMTP in `@ghuri/mail/smtp`, console, locmem, dummy), test outbox | core |
+| `tenants` | `@ghuri/tenants` | Shared-schema multi-tenancy: `tenantModel()` factories, fail-closed tenant QuerySets, write checks, `TenantMiddleware` + resolvers, `tenantCache()`, leak tests | core, orm, `hono` |
 | `cli` | `@ghuri/cli` | `ghuri` binary (`startproject`, `startapp`, `runserver`, `migrate`, …) | core, orm |
 | `create-ghuri` | `create-ghuri` | `npm create ghuri@latest` → runs `startproject` | — |
 | `docs` | — | Starlight docs site | — |
@@ -737,8 +740,7 @@ mysite/
 
 ## 13. Roadmap after 0.1
 
-`@ghuri/tasks` (Cloudflare Queues + Node worker), `@ghuri/mail` (Email Workers / SMTP / Resend),
-`@ghuri/forms` (standalone forms), i18n, Redis cache, read replicas / DB routers, `@ghuri/realtime`
+`@ghuri/tasks` (Cloudflare Queues + Node worker), `@ghuri/forms` (standalone forms), i18n, Redis cache, read replicas / DB routers, `@ghuri/realtime`
 (Durable Objects / WebSockets, specified in section 16), GraphQL.
 
 ---
@@ -792,6 +794,25 @@ disable FKs); `sqlmigrate --all` SQL files record their own `ghuri_migrations` r
 first `SchemaView` routed in `ROOT_URLCONF` (its title/version/servers/patterns/prefix), so the file equals what that
 view serves; a `--file` ending in `.json` defaults to JSON. YAML comes from a built-in emitter (no dependency).
 `startproject` routes `api/schema/`, `api/docs/` (Swagger UI) and `api/reference/` (Scalar) before the router include.
+
+**mail** (as built, github.com/ghurijs/mail): `django.core.mail` with camelCase names and async sending: `sendMail`,
+`sendMassMail`, `mailAdmins`, `mailManagers`, `EmailMessage`, `EmailMultiAlternatives`, `getConnection`,
+`BaseEmailBackend`, `BadHeaderError`, `EmailSendError`. `EMAIL_BACKEND` is a `{ backend, create(env, options) }` config
+like caches and storages: `cloudflareEmailBackend({ binding })`, `resendBackend({ apiKey })`, `consoleBackend()`,
+`locmemBackend()`, `dummyBackend()`, and `smtpBackend()` from the Node-only subpath `@ghuri/mail/smtp` (reads Django's
+`EMAIL_HOST*` / `EMAIL_PORT` / `EMAIL_USE_TLS|SSL`). Differences: no default SMTP backend (unset `EMAIL_BACKEND` means
+console in `DEBUG`, `ImproperlyConfigured` otherwise); `message()` returns a `MIMEPart`; no `attachFile()`; `ADMINS` /
+`MANAGERS` are address strings. `@ghuri/mail/testing`: `outbox`, `useOutbox()`, `restoreEmailBackend()`, `clearOutbox()`.
+
+**tenants** (as built, github.com/ghurijs/tenants): shared-schema only (one database, a tenant FK per row), because
+schema-per-tenant does not exist on D1/SQLite. `tenantModel({ field, to, relatedName, uuidPk })` / `TenantModel` give a
+tenant FK, `objects` (`TenantManager`; the filter is added when the QuerySet runs, including as a subquery) and
+`unscoped`. With no tenant active, queries and writes **fail closed** (`TenantNotSet`); writes and FKs that cross
+tenants raise `CrossTenantError`. Context: `runAsTenant`, `withoutTenant`, `activateTenant`, `currentTenant`,
+`requireTenant`, `tenantMode`. `TenantMiddleware` runs `TENANTS.RESOLVERS` (`HeaderResolver`, `SubdomainResolver`,
+`HostResolver`, functions) and honours `TENANTS.REQUIRED`; `TenantNotFound` is an `Http404`. Also `tenantCache()`,
+`uuid7()`, and `assertTenantIsolation()` in `@ghuri/tenants/testing`. Not yet: per-tenant database routing,
+`dumpdata --tenant`, Postgres RLS, admin integration, a REST membership permission class.
 
 ---
 
@@ -1367,7 +1388,7 @@ runs the whole flow against a mocked provider (`@ghuri/oauth/testing`) and leave
    with GitHub, Google, Facebook, Microsoft, Discord, GitLab, generic OIDC, models, flow, adapter, URLs, admin,
    SPA/JWT and native-token endpoints.
 2. Apple, X, LinkedIn, Slack; `@ghuri/rest` views; refresh-token helpers; email confirmation for unverified
-   signups (with a future `@ghuri/mail`).
+   signups (with `@ghuri/mail`).
 
 ### 18.9 As built (supersedes 18.1–18.8 where they conflict)
 
