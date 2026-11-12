@@ -1,0 +1,13 @@
+{
+  "name": "ghuri",
+  "description": "Official Ghuri skill: write correct code for Ghuri, the Django-style TypeScript framework (Hono + Drizzle on Cloudflare Workers / Node), plus the project's `ghuri mcp` dev server for inspecting models, routes and migrations.",
+  "version": "0.1.0-alpha.0",
+  "author": {
+    "name": "Ghuri contributors",
+    "url": "https://github.com/ghurijs"
+  },
+  "homepage": "https://ghurijs.github.io/docs/",
+  "repository": "https://github.com/ghurijs/ghuri",
+  "license": "MIT",
+  "keywords": ["ghuri", "django", "typescript", "hono", "drizzle", "cloudflare-workers", "d1", "orm", "rest", "mcp"]
+}

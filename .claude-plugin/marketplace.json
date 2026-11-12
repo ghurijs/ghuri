@@ -1,0 +1,27 @@
+{
+  "name": "ghuri",
+  "owner": {
+    "name": "ghurijs",
+    "url": "https://github.com/ghurijs"
+  },
+  "metadata": {
+    "description": "Official Claude Code plugins for Ghuri, the Django-style TypeScript framework for Cloudflare Workers and Node.",
+    "version": "0.1.0-alpha.0"
+  },
+  "plugins": [
+    {
+      "name": "ghuri",
+      "source": "./plugins/ghuri",
+      "description": "Teaches Claude to write correct Ghuri code (models, migrations, views, REST, admin, auth, GraphQL, WebSockets, storage, agents, tests, deployment) and connects the project's `ghuri mcp` dev server.",
+      "version": "0.1.0-alpha.0",
+      "category": "development",
+      "tags": [
+        "ghuri",
+        "typescript",
+        "django",
+        "cloudflare-workers",
+        "framework"
+      ]
+    }
+  ]
+}
