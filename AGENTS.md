@@ -18,7 +18,7 @@ ARCHITECTURE.md     the spec every package is built against (§14 "As-built note
 package.json        npm workspace: packages/*, examples/*
 scripts/            bootstrap.sh (clone + install + build), publish-all.sh (maintainer only)
 packages/<name>/    one repo per package: github.com/ghurijs/<name>
-                    core, orm, auth, rest, storage, admin, agents, graphql, realtime, cli, create-ghuri
+                    core, orm, auth, rest, storage, admin, agents, graphql, realtime, tenants, cli, create-ghuri
 examples/           github.com/ghurijs/examples — examples/blog is the end-to-end test project
 docs/               github.com/ghurijs/docs — Starlight site (not a workspace; not cloned by bootstrap:
                     git clone https://github.com/ghurijs/docs.git docs)
