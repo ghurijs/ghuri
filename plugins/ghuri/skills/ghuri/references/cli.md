@@ -108,6 +108,7 @@ Agents running commands non-interactively should pass `--no-input` where support
 | `list_routes` | URL patterns with names, methods, views |
 | `list_commands` | available management commands |
 | `show_migrations` | applied / pending migrations |
+| `openapi_schema` | the project's real OpenAPI document: by default a list of operations (`GET /api/posts/ — listPosts [api]`); `path` prefix, `tag` or `summary: false` for JSON of the matching paths and the schemas they use |
 | `run_command` | run a management command (`makemigrations`, `migrate` on the local DB, `check`, `test`, `startapp`, `sqlmigrate`, app commands); `runserver`, `shell`, `deploy`, `flush` and `--remote` are refused |
 | `search_docs` / `get_doc` | search and read the Ghuri docs (https://ghurijs.github.io/docs/llms-full.txt; `--docs-url` overrides) |
 

@@ -220,7 +220,7 @@ Handshakes still go through `app.fetch` (middleware, routing). With `memoryLayer
 
 ## Handshake: auth and permissions
 
-Order after `MIDDLEWARE`: (1) Origin check: browser `Origin` must match the host, `CSRF_TRUSTED_ORIGINS` or `ALLOWED_ORIGINS` (else 403; `Origin: null` refused; no Origin header passes). (2) `authenticationClasses` (invalid credentials 401). (3) `permissionClasses` (`hasPermission({ user, auth, method: 'GET', c }, ConsumerClass)`). (4) `static room` (`null` -> 403). (5) scope size check (431 if over 2 KB). (6) `connect()` in the room.
+Order after `MIDDLEWARE`: (1) Origin check: browser `Origin` must match the host, `CSRF_TRUSTED_ORIGINS` or `ALLOWED_ORIGINS` (else 403; `Origin: null` refused; no Origin header passes). (2) `authenticationClasses` (invalid credentials 401). (3) `permissionClasses` (`hasPermission({ user, auth, method: 'GET', c, scope }, ConsumerClass)`; `scope.room` / `scope.connectionId` are still empty at this point, realtime 0.1.0-alpha.2+). (4) `static room` (`null` -> 403). (5) scope size check (431 if over 2 KB). (6) `connect()` in the room.
 
 Browsers cannot set `Authorization` on a WebSocket: send the token as a subprotocol; Ghuri copies it into `Authorization: <TOKEN_KEYWORD> <token>` and echoes the `ghuri` subprotocol.
 

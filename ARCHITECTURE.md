@@ -952,7 +952,7 @@ export interface Scope {
    (`Sec-WebSocket-Protocol: ghuri, bearer.<token>`, default) or, opt-in, as `?token=` (it ends up in logs).
    Realtime copies it into `Authorization: <keyword> <token>` on the request handed to the classes;
    the keyword is `REALTIME.TOKEN_KEYWORD` (default `Bearer`).
-5. `permissionClasses` run with `request.user`; failure → 401/403.
+5. `permissionClasses` run with `request.user`, `request.auth` and `request.scope` (room not yet resolved); failure → 401/403.
 6. `room` is resolved; `null` → 403.
 7. The socket is handed to the layer: on Workers, the view forwards the upgrade to the room's DO and returns
    its `101` response; on Node it is accepted in-process. `connect()` runs **in the room** (in the DO).

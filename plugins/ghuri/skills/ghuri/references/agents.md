@@ -191,7 +191,7 @@ URL names: `agents-<name>-chat`, `agents-<name>-conversations`, `agents-<name>-c
 
 ## MCP server
 
-`agents.mcp(opts)` returns URL patterns (mount at a path with trailing slash). Without a router: `const mcp = new McpServer({ name: 'shop', tools, agents: { editor: () => new EditorAgent() } })` then `path('mcp/', mcp.urls)` (`McpView` is the view behind `mcp.asView()`).
+`agents.mcp(opts)` returns URL patterns (mount at a path with trailing slash). Without a router: `const mcp = new McpServer({ name: 'shop', tools, agents: { editor: EditorAgent } })` (an `Agent` subclass, or a factory `() => new EditorAgent()`; classes need agents 0.1.0-alpha.1+), then `path('mcp/', mcp.urls)` (`McpView` is the view behind `mcp.asView()`).
 
 `McpServerOptions`: `name` ('ghuri'), `version` ('0.1.0'), `title`, `instructions`, `tools`, `agents` (factory map on `McpServer`; `true`/names/`false` on `agents.mcp()`), `authenticationClasses`, `permissionClasses`, `allowAnyOrigin` (false).
 

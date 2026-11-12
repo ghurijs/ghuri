@@ -11,7 +11,7 @@ It is brand new, so your instincts are wrong in predictable ways: the names are 
 
 ## Check the real project first
 
-- If the `ghuri` MCP server is connected (tools `project_info`, `list_apps`, `list_models`, `describe_model`, `list_routes`, `list_commands`, `show_migrations`, `run_command`, `search_docs`, `get_doc`), use it before editing: inspect the real models, routes, apps and migration state instead of guessing, run `makemigrations` / `migrate` / `check` / `test` through `run_command`, and use `search_docs` when unsure an API exists.
+- If the `ghuri` MCP server is connected (tools `project_info`, `list_apps`, `list_models`, `describe_model`, `list_routes`, `list_commands`, `show_migrations`, `openapi_schema`, `run_command`, `search_docs`, `get_doc`), use it before editing: inspect the real models, routes, apps and migration state instead of guessing, run `makemigrations` / `migrate` / `check` / `test` through `run_command`, and use `search_docs` when unsure an API exists.
 - Without it, read `src/settings.ts`, `src/urls.ts` and the relevant `src/<app>/` files, and run `npx ghuri <command>` in the shell.
 - Full docs (one file, for search): https://ghurijs.github.io/docs/llms-full.txt. Only use APIs that the docs, these references or the project's own code show exist. If a Django/DRF feature is not listed, assume it does not exist and say so rather than inventing it.
 
