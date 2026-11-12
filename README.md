@@ -49,6 +49,7 @@ const recent = await Post.objects.filter({ author__username: 'rifat' }).orderBy(
 | [`@ghuri/socialauth`](https://github.com/ghurijs/socialauth) | Social login like django-allauth: GitHub, Google, Facebook, Microsoft, Discord, GitLab, any OIDC |
 | [`@ghuri/tenants`](https://github.com/ghurijs/tenants) | Shared-schema multi-tenancy: tenant-scoped models and QuerySets that fail closed, request resolvers, leak tests |
 | [`@ghuri/storage`](https://github.com/ghurijs/storage) | R2 / S3 / filesystem storage, `FileField` |
+| [`@ghuri/mail`](https://github.com/ghurijs/mail) | Django-style email: `sendMail`, `EmailMessage`; console, locmem, Resend, Cloudflare Email and SMTP backends |
 | [`@ghuri/admin`](https://github.com/ghurijs/admin) | the Django admin, server-rendered on Workers |
 | [`@ghuri/agents`](https://github.com/ghurijs/agents) | AI agents with tools generated from your models and viewsets, MCP server |
 | [`@ghuri/cli`](https://github.com/ghurijs/cli) | `ghuri startproject`, `startapp`, `migrate`, `createsuperuser`, … |

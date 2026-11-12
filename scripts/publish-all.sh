@@ -10,7 +10,7 @@ if [ ! -t 0 ]; then
   echo "so npm would fail with EOTP. Type the command into a terminal window yourself and press Enter at each prompt."
   exit 1
 fi
-ORDER=(core orm storage auth rest admin agents graphql realtime oauth socialauth tenants cli create-ghuri)
+ORDER=(core mail orm storage auth rest admin agents graphql realtime oauth socialauth tenants cli create-ghuri)
 npm whoami >/dev/null || { echo "Run: npm login"; exit 1; }
 npm run build
 for p in "${ORDER[@]}"; do
