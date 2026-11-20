@@ -877,6 +877,16 @@ writes `node_modules/.ghuri/vitest.eval.config.mjs` (the project's vitest config
 globs, `fileParallelism: false`, `silent: false`, long timeouts) and passes options as `GHURI_EVAL_*` env vars. No
 Django equivalent.
 
+**agents tool shaping** (as built, all opt-in): `toolSearch` registers every tool in the AI SDK tool set plus
+`find_tools`, and limits what is sent with `activeTools` / `prepareStep` to `alwaysLoaded` + `find_tools` + names
+found in earlier `find_tools` results in the messages (so loads persist across turns through stored history, with no
+extra state). Search is plain word scoring over name, title and description (trailing plural stripped), no
+embeddings. `strictToolInput` checks only the top level of the JSON Schema; problems are recorded in `validate` and
+thrown from `execute` (a `WeakMap` on the arguments object) so the model gets the plain `ToolInputError` text rather
+than the AI SDK's wrapped validation error, and the history keeps the raw arguments. `resultFields` / `compact`
+shape results after `invoke()` (rows of `results` for paginated lists). `examples` are rendered into the
+description (portable across providers) rather than provider-specific input-example fields.
+
 ---
 
 ## 15. `@ghuri/graphql` (graphene-django style)
