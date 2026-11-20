@@ -869,6 +869,14 @@ the project model sets `dbTable: 'agents_conversation'` and its migration adopts
 `CreateModel` + `AlterModelOptions`, then a `RunCode` that adds the tenant column, or creates the table on a new
 database), with no dependency on `agents`.
 
+**agents evals** (as built): `@ghuri/agents/evals` (separate entry, test-time only): `defineEval` / `runEval` /
+`formatEvalReport`, deterministic checks plus `judge()` (a model grades against a rubric; verdict parsed from a JSON
+object in its answer). Attempts run sequentially with `memory: false`, the model swapped by assigning
+`agent.model`; usage is the run total; cost from per-suite `prices` ($/MTok, cache reads separate). `ghuri eval`
+writes `node_modules/.ghuri/vitest.eval.config.mjs` (the project's vitest config with `include` replaced by the eval
+globs, `fileParallelism: false`, `silent: false`, long timeouts) and passes options as `GHURI_EVAL_*` env vars. No
+Django equivalent.
+
 ---
 
 ## 15. `@ghuri/graphql` (graphene-django style)
