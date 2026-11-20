@@ -787,7 +787,23 @@ only unforgeable sources: `CF-Connecting-IP` on Cloudflare (`navigator.userAgent
 `loadData`, `flushDatabase`, `copyData`. `@ghuri/orm/commands` (Node) exports `registerOrmCommands()` and `setMigrationImporter()`.
 One-off defaults are stored as `oneOffDefault`; index names are always explicit; SQLite/D1 rebuilds copy via a temp table (D1 can't
 disable FKs); `sqlmigrate --all` SQL files record their own `ghuri_migrations` rows; `postMigrate` also fires after `flush` and
-`setupTestDatabase`. Not yet: `squashmigrations`, `inspectdb`, swappable-dependency markers, PK/auto-field changes.
+`setupTestDatabase`. Not yet: `squashmigrations`, `inspectdb`, PK/auto-field changes.
+
+**orm swappable models** (as built): `Meta.swappable = 'SETTING'` (dotted names read nested settings,
+`'AGENTS.CONVERSATION_MODEL'`); `_meta.swapped` is the other label when the setting names another model, read from the
+current settings (historical models never are). A swapped model is skipped by `ModelRegistry.register` (so not in
+`apps`, the autodetector, test databases or dumpdata), its relations wire no reverse relations, and its managers throw
+Django's "Manager isn't available" (as `ImproperlyConfigured`). `getSwappableModel(setting, default)` generalises
+`getUserModel()`. Migration markers: `swappableModel(setting, default)` as a field's `to` (a getter on the normalized
+options, so every reader sees a string) and `swappableDependency(setting, default)` (an array whose `[0]` is a getter).
+**Deliberate differences from Django:** the dependency resolves to the migration that `CreateModel`s the swapped-in
+model (Django: always `__first__`), falling back to `__first__` when that migration depends on the origin; edges from
+it are ignored by the consistency check (an applied migration may precede a model swapped in later); own-app
+`__first__` dependencies are ignored; swapped models are not returned by `apps.getModel()` (as `auth.User` already
+wasn't). The loader drops a swapped model's operations (`CreateModel` with `options.swappable` and later ops on that
+model) instead of keeping them in state with no database effect. `makemigrations` emits the markers for relations to
+any model named by a swappable setting and records `swappable` in `CreateModel` options (not an `AlterModelOptions`
+key). `@ghuri/auth` keeps its own `migrationsForUserModel()` adapter for its bundled files.
 
 **auth** (as built): app labels `contenttypes`, `auth`, `sessions`, `authtoken`, `token_blacklist`; Django table names
 (`auth_user`, `django_content_type`, `django_session`, …); hashes/signing/sessions byte-compatible with Django; default PBKDF2
@@ -820,9 +836,38 @@ tenant FK, `objects` (`TenantManager`; the filter is added when the QuerySet run
 `unscoped`. With no tenant active, queries and writes **fail closed** (`TenantNotSet`); writes and FKs that cross
 tenants raise `CrossTenantError`. Context: `runAsTenant`, `withoutTenant`, `activateTenant`, `currentTenant`,
 `requireTenant`, `tenantMode`. `TenantMiddleware` runs `TENANTS.RESOLVERS` (`HeaderResolver`, `SubdomainResolver`,
-`HostResolver`, functions) and honours `TENANTS.REQUIRED`; `TenantNotFound` is an `Http404`. Also `tenantCache()`,
+`HostResolver`, functions) and honours `TENANTS.REQUIRED`; `TenantNotFound` is an `Http404`, `CrossTenantError` a
+`PermissionDenied` (403). Host resolvers read core's `getHost()` (`X-Forwarded-Host` only with `USE_X_FORWARDED_HOST`).
+`tenantModel({ extends })` inherits an abstract model (e.g. `AbstractBaseUser`) for per-tenant users, which get their
+own JWT classes through `@ghuri/auth`'s `JWTToken.userModel()` / `tokenType`. `uuid7()` is monotonic per process. Also `tenantCache()`,
 `uuid7()`, and `assertTenantIsolation()` in `@ghuri/tenants/testing`. Not yet: per-tenant database routing,
 `dumpdata --tenant`, Postgres RLS, admin integration, a REST membership permission class.
+
+**Context carriers** (core, no Django equivalent): `registerContextCarrier({ name, capture, restore })`,
+`captureContext()` → `Record<string, string>`, `restoreContext(captured, fn)`. Lets request-scoped state cross a queue
+or service boundary without the sender importing the package that owns it. `@ghuri/tenants` registers `tenant`
+(pk; `restore` loads the tenant under `withoutTenant()` and runs `runAsTenant()`, `TenantNotFound` when gone;
+`withoutTenant()` is deliberately not carried). Unknown keys are ignored. Siblings read these functions off the core
+namespace (`(core as any).captureContext?.()`) so they keep working with older core releases.
+
+**agents, gateway and traces** (as built): `AgentJob.carried` holds `captureContext()` and the queue consumer runs
+inside `restoreContext()`, so queued runs keep their tenant. `resolveModel(model, env?, run?)` passes
+`ProviderContext.run = { agent, user, carried }` (model resolution still happens before the conversation exists, so
+no conversation id), and `PROVIDERS[name].headers` may be a function of that context. Built-in `ghuri-ai:` provider:
+`<alias>` → `<baseURL>/v1/chat/completions` (OpenAI-compatible), `anthropic/<id>` and `openai/<id>` → pass-through
+routes `<baseURL>/v1/anthropic` / `/v1/openai` with the provider SDKs; headers `x-ghuri-agent`, `x-ghuri-user`,
+`x-ghuri-<carrier>`. The chat view maps provider `APICallError`s (also inside `RetryError`): 429 → `Throttled` with
+`Retry-After`, 401/402/403 → `ModelUnavailable` (503); API exceptions are never remapped. `runFinished` signal after
+every run (robust: receiver errors are logged). Opt-in `AGENTS.TRACE_RUNS` writes `agents.Run` (migration
+`0002_run`; tenant kept as the carried JSON, not a FK, so agents does not depend on tenants); a failed trace write
+warns once and never fails the run. `agents.Conversation` is swappable with `AGENTS.CONVERSATION_MODEL`
+(`conversationFields`, `AbstractConversation`, `getConversationModel()`); memory, views, `Message.conversation` and
+`Run.conversation` follow it, so a `StoreModel({ ...conversationFields })` scopes conversations to the tenant (another
+store's is a 404). `Message` is not swappable: messages are reached through their conversation. The agents migrations
+use the swappable markers instead of the old load-time `AUTH_USER_MODEL` adapter. Swapping on an existing database:
+the project model sets `dbTable: 'agents_conversation'` and its migration adopts the table (`managed: false`
+`CreateModel` + `AlterModelOptions`, then a `RunCode` that adds the tenant column, or creates the table on a new
+database), with no dependency on `agents`.
 
 ---
 
