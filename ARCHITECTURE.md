@@ -1849,6 +1849,13 @@ Errors (extend `GhuriError`): `InvalidTask`, `InvalidTaskBackend`, `TaskResultDo
 - **Core** (unreleased): `parseCron` / `isValidCron` with Cloudflare semantics (UTC, day of week 1-7 with 1 = Sunday,
   names, `L`, `W`, `#`; both day fields restricted → either matches), `startScheduler(app, opts)` and
   `serve({ scheduler })` in `@ghuri/core/node`, `taskHandlers.crons()`, `AppConfig.tasks`.
-- **Not yet (phase 1 leftovers):** agents still use their own queue code; CLI templates, `examples/blog` and
+- **Agents on tasks:** `@ghuri/tasks` publishes `globalThis[Symbol.for('ghuri.tasks.interop')] = { version: 1, task,
+  getTask }`. `@ghuri/agents` does not depend on it (a missing package breaks a Workers bundle even behind a dynamic
+  import): an `onPopulate` hook defines the `agents.run` task (`maxAttempts: 3`) when the interop object exists, and
+  `agent.enqueue()` uses it unless `AGENTS.ENQUEUE: 'queue'`, `AGENTS.QUEUE_BINDING` or `opts.binding` asks for the
+  Queue path. It returns `{ conversationId, taskResult, taskResultId }`. Workers find agents by name in a global
+  registry filled by `AgentRouter.register()` / `registerAgent()`. `consumeAgentQueue` is **not** deprecated: it is
+  the background path without `@ghuri/tasks`.
+- **Not yet (phase 1 leftovers):** CLI templates, `examples/blog` and
   `scripts/portability.sh` are not updated; Queues are tested with fake bindings through `app.queue()`, not
   end to end in Miniflare.
