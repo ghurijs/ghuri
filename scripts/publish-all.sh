@@ -36,11 +36,17 @@ ORDER=(core mail orm storage auth rest admin tasks vectors billing agents graphq
 
 is_prerelease() { [[ "$1" == *-* ]]; }
 
-# Does `name` have any stable (non-prerelease) version on npm?
+# Does `name` have any stable (non-prerelease) version on npm? No for a package that was never published: `npm
+# view` then exits non-zero after printing an error object on stdout (so its output must not be parsed).
 has_stable_release() {
   local versions
-  versions=$(npm view "$1" versions --json 2>/dev/null || echo '[]')
-  node -e 'const v = JSON.parse(process.argv[1]); process.exit([].concat(v).some((x) => !String(x).includes("-")) ? 0 : 1)' "$versions"
+  versions=$(npm view "$1" versions --json 2>/dev/null) || return 1
+  node -e '
+    let v
+    try { v = JSON.parse(process.argv[1]) } catch { process.exit(1) }
+    if (!Array.isArray(v) && typeof v !== "string") process.exit(1)
+    process.exit([].concat(v).some((x) => !String(x).includes("-")) ? 0 : 1)
+  ' "$versions"
 }
 
 tag_for() {
