@@ -51,6 +51,7 @@ One GitHub repo per package under `github.com/ghurijs`. npm scope `@ghuri`. All 
 | `oauth-provider` | `@ghuri/oauth-provider` | django-oauth-toolkit-style OAuth 2.1 authorization server: PKCE, rotating refresh tokens, CIMD + dynamic registration, RFC 8707 JWT access tokens, admin; the authorization server for MCP (section 19) | core, orm, auth, oauth, (optional) rest, admin |
 | `socialauth` | `@ghuri/socialauth` | django-allauth-style social login: providers, `SocialAccount`, signup/linking, admin (section 18) | core, orm, auth, oauth |
 | `mail` | `@ghuri/mail` | `django.core.mail` clone: `sendMail`, `EmailMessage`, backends (Cloudflare Email Service, Resend, SMTP in `@ghuri/mail/smtp`, console, locmem, dummy), test outbox | core |
+| `tasks` | `@ghuri/tasks` | `django.tasks`-style background tasks: `task()`, `TaskResult`, Cloudflare Queues / database / immediate / dummy backends, retries, periodic tasks, `db_worker` (section 20) | core, orm, (optional) admin |
 | `tenants` | `@ghuri/tenants` | Shared-schema multi-tenancy: `tenantModel()` factories, fail-closed tenant QuerySets, write checks, `TenantMiddleware` + resolvers, `tenantCache()`, leak tests | core, orm, `hono` |
 | `cli` | `@ghuri/cli` | `ghuri` binary (`startproject`, `startapp`, `runserver`, `migrate`, …) | core, orm |
 | `create-ghuri` | `create-ghuri` | `npm create ghuri@latest` → runs `startproject` | — |
@@ -741,7 +742,7 @@ mysite/
 
 ## 13. Roadmap after 0.1
 
-`@ghuri/tasks` (Cloudflare Queues + Node worker), `@ghuri/forms` (standalone forms), i18n, Redis cache, read replicas / DB routers, `@ghuri/realtime`
+`@ghuri/tasks` (Cloudflare Queues + Node worker; specified in section 20), `@ghuri/forms` (standalone forms), i18n, Redis cache, read replicas / DB routers, `@ghuri/realtime`
 (Durable Objects / WebSockets, specified in section 16), GraphQL.
 
 ---
@@ -1549,3 +1550,305 @@ optional `@ghuri/rest` / `@ghuri/admin` integration that login-only apps should 
   `server/discover`; `resultType: 'complete'` and `serverInfo` in `_meta`; `ttlMs` / `cacheScope` on lists (`private`
   in OAuth mode); unknown or removed methods (`ping`, `logging/setLevel`) 404 / `-32601`; batches refused. `initialize`
   negotiates the newest legacy revision (`2025-11-25`). No SSE (subscriptions/listen, MRTR, tasks not implemented).
+
+## 20. `@ghuri/tasks` (Django 6.0 `django.tasks` style background tasks)
+
+Status: **0.1 built** (see 20.11 for where it differs from this text). Repo `ghurijs/tasks`, npm `@ghuri/tasks`, peers `@ghuri/core` (required) and
+`@ghuri/orm` (optional: the `tasks` app, result storage and the database backend).
+
+Django 6.0 added `django.tasks`: a `@task` decorator, `task.enqueue()`, pluggable backends chosen in the `TASKS`
+setting, `TaskResult` objects and three signals. Django ships only the `ImmediateBackend` and `DummyBackend`; the
+`django-tasks` package adds a `DatabaseBackend` and the `db_worker` command. Ghuri implements that API, with the same
+names, and adds what a Cloudflare-first framework needs:
+
+- a **Cloudflare Queues** backend (the default on Workers),
+- a **database** backend that runs on Postgres, SQLite and D1 (the default on Node),
+- **retries** and **periodic tasks**, which `django.tasks` leaves to backends and Celery beat,
+- **context carriers** (tenant, …) restored around every run, as agents already do (§14).
+
+It replaces the queue code in `@ghuri/agents` (`enqueueRun` / `consumeAgentQueue`) with ordinary tasks.
+
+```ts
+// src/blog/tasks.ts
+import { task } from '@ghuri/tasks'
+import { sendMail } from '@ghuri/mail'
+import { Post } from './models'
+
+export const notifySubscribers = task(async (postId: number) => {
+  const post = await Post.objects.get({ pk: postId })
+  await sendMail({ subject: `New post: ${post.title}`, message: post.summary, recipientList: await post.subscriberEmails() })
+  return { notified: true }
+}, { queueName: 'emails', maxAttempts: 3 })
+
+export const cleanUpDrafts = task(async () => {
+  await Post.objects.filter({ status: 'draft', updatedAt__lt: daysAgo(30) }).delete()
+})
+
+// src/blog/app.ts — tasks are registered like models: '<app label>.<export name>' ('blog.notifySubscribers')
+import { AppConfig } from '@ghuri/core'
+import { periodicTask } from '@ghuri/tasks'
+import * as tasks from './tasks'
+import { cleanUpDrafts } from './tasks'
+export class BlogConfig extends AppConfig {
+  name = 'blog'
+  tasks = tasks
+  ready() {
+    periodicTask('0 3 * * *', cleanUpDrafts)       // also listed in wrangler.jsonc "triggers.crons"
+  }
+}
+
+// a view, a signal receiver, an agent tool…
+const result = await notifySubscribers.enqueue(post.pk)          // TaskResult, status READY
+const later = await notifySubscribers.using({ runAfter: inMinutes(10) }).enqueue(post.pk)
+const fresh = await notifySubscribers.getResult(result.id)       // needs a backend with supportsGetResult
+```
+
+```ts
+// src/settings.ts
+TASKS: {
+  default: env.TASKS_QUEUE ? cloudflareQueues({ queues: { default: 'TASKS_QUEUE', emails: 'EMAILS_QUEUE' } })
+                           : database(),                           // Node + Postgres / SQLite
+},
+INSTALLED_APPS: [..., TasksConfig],                                // result rows, admin, db backend tables
+```
+```jsonc
+// wrangler.jsonc
+"queues": {
+  "producers": [{ "binding": "TASKS_QUEUE", "queue": "mysite-tasks" }, { "binding": "EMAILS_QUEUE", "queue": "mysite-emails" }],
+  "consumers": [{ "queue": "mysite-tasks", "max_retries": 5 }, { "queue": "mysite-emails", "max_retries": 5 }]
+},
+"triggers": { "crons": ["0 3 * * *"] }
+```
+
+### 20.1 Tasks
+
+```ts
+export function task<A extends JsonValue[], R>(
+  fn: (...args: A) => R | Promise<R>,                    // or (context: TaskContext, ...args) with takesContext
+  options?: {
+    name?: string                  // required when the task is not exported from an app's `tasks` module
+    priority?: number              // -100..100, default 0 (DEFAULT_TASK_PRIORITY)
+    queueName?: string             // default 'default' (DEFAULT_TASK_QUEUE_NAME)
+    backend?: string               // TASKS alias, default 'default'
+    runAfter?: Date | null
+    takesContext?: boolean
+    maxAttempts?: number           // Ghuri: default 1 (no retries, as Django)
+    retryDelay?: number | ((attempt: number) => number)   // Ghuri: seconds, default exponential 2^attempt capped at 1 h
+  },
+): Task<A, R>
+
+export class Task<A, R> {
+  readonly name: string            // 'blog.notifySubscribers' — Django's module_path
+  readonly priority, queueName, backend, runAfter, takesContext, maxAttempts
+  using(overrides: { priority?, queueName?, runAfter?, backend? }): Task<A, R>   // returns a copy
+  enqueue(...args: A): Promise<TaskResult<R>>       // Django's enqueue + aenqueue (all I/O is async)
+  getResult(id: string): Promise<TaskResult<R>>     // Django's get_result / aget_result
+  call(...args: A): Promise<R>                      // run now, in-process (Django's task.call)
+}
+```
+
+- **Names.** Workers have no module paths, so a task is identified by `<app label>.<export name>`, filled in when
+  `apps.populate()` walks `AppConfig.tasks` (new optional property, next to `models`). A task outside an app passes
+  `name`. Enqueuing an unnamed task raises `InvalidTask`. Two tasks with one name raise `ImproperlyConfigured` at
+  populate. The worker looks tasks up by name, so renaming a task strands messages already queued (documented).
+- **Arguments** are positional and must round-trip through JSON unchanged (Django's rule, minus kwargs). `Date`,
+  `Map`, model instances and `undefined` raise `InvalidTask` at enqueue. Pass primary keys, not instances.
+- **Validation** at enqueue, as Django: `InvalidTask` when the backend lacks `supportsDefer` and `runAfter` is set,
+  lacks `supportsPriority` and `priority` is not 0, or `queueName` is not in the backend's `QUEUES`.
+- **Context.** `takesContext: true` passes `TaskContext { taskResult, attempt }` as the first argument.
+- **Carriers.** `enqueue()` stores `captureContext()` (§14) with the task and the worker runs inside
+  `restoreContext()`, so a task enqueued during a tenant's request runs as that tenant. The request **user is not
+  carried** (as in Django); pass a user pk. Deliberate difference: Django has no carriers.
+- **Transactions.** Enqueue after the data a task reads is committed: `onCommit(() => notify.enqueue(post.pk))`
+  (`@ghuri/orm`). Not automatic, as in Django.
+
+### 20.2 Results
+
+```ts
+export enum TaskResultStatus { READY = 'READY', RUNNING = 'RUNNING', FAILED = 'FAILED', SUCCESSFUL = 'SUCCESSFUL' }
+
+export class TaskResult<R> {
+  readonly id: string                       // uuid7
+  readonly task: Task<any, R>
+  readonly status: TaskResultStatus
+  readonly enqueuedAt, startedAt, finishedAt, lastAttemptedAt: Date | null
+  readonly args: JsonValue[]
+  readonly backend: string
+  readonly errors: TaskError[]              // { exceptionClassPath, traceback } — one per failed attempt
+  readonly workerIds: string[]
+  readonly attempts: number
+  readonly isFinished: boolean
+  get returnValue(): R                      // throws `TaskResultNotReady` until SUCCESSFUL (Django: ValueError)
+  refresh(): Promise<void>                  // Django's refresh / arefresh
+}
+```
+
+Return values must be JSON; a value that is not fails the task. Results are stored in `tasks.DBTaskResult`
+(table `tasks_dbtaskresult`, django-tasks' columns in snake_case, `task_name` for `task_path`) when the `tasks` app is
+installed. Without it, only `immediate()` and `dummy()` can answer `getResult()`.
+
+### 20.3 Backends
+
+```ts
+interface TaskBackend {
+  alias: string
+  readonly supportsDefer: boolean
+  readonly supportsGetResult: boolean
+  readonly supportsPriority: boolean
+  enqueue(task, args): Promise<TaskResult>
+  getResult(id): Promise<TaskResult>
+  check(): CheckMessage[]
+}
+export const taskBackends: { get(alias): TaskBackend; all(): TaskBackend[] }   // like `caches`
+export const defaultTaskBackend: TaskBackend
+```
+
+| | `immediate()` | `dummy()` | `cloudflareQueues(opts)` | `database(opts)` |
+|---|---|---|---|---|
+| Django name | `ImmediateBackend` | `DummyBackend` | — | `django-tasks` `DatabaseBackend` |
+| Runs | inside `enqueue()` | never (stores) | Queue consumer (`app.queue`) | `ghuri db_worker` (Node) or a cron drain (Workers) |
+| `supportsDefer` | no | yes | yes, up to 12 h (Queues' `delaySeconds` limit; later raises `InvalidTask`) | yes |
+| `supportsPriority` | no | yes | no | yes |
+| `supportsGetResult` | yes | yes | with the `tasks` app | yes |
+| Retries | no | — | `msg.retry({ delaySeconds })` | `run_after` set to the retry time |
+| Default for | `DEBUG` and tests | tests | Workers | Node |
+
+**`cloudflareQueues({ queues: { <queueName>: <producer binding> }, results?: boolean })`.**
+- Sends `{ type: 'ghuri.tasks.run', task, id, args, attempt, carried }` (128 KB message limit → `InvalidTask`).
+- Registers one `onQueue('*')` consumer that handles only messages of that type, so agent jobs and the app's own
+  messages pass through untouched.
+- Each message is acked on success. On failure it is retried with `retryDelay` until `maxAttempts`, then marked
+  `FAILED` and acked, so Cloudflare's `max_retries` is a safety net, not the policy.
+- `ghuri check` warns when a consumer's `max_retries` (read from wrangler.jsonc) is lower than a task's
+  `maxAttempts - 1`.
+- Consumers get 15 minutes of wall time per batch. Longer work should be split into tasks that enqueue the next one
+  (Cloudflare Workflows support is phase 3).
+
+**`database({ alias?: 'default', pollInterval?: 1, batchSize?: 1 })`.**
+- Stores tasks in `tasks_dbtaskresult` on any `DATABASES` alias, so it is in the portability matrix.
+- Claims work atomically:
+  - Postgres: `SELECT … FOR UPDATE SKIP LOCKED`, any number of workers.
+  - SQLite: `UPDATE … WHERE id = (SELECT …) RETURNING`, one worker per database file is recommended.
+  - D1: the same `UPDATE … RETURNING`, run by `drainTasks({ seconds: 25 })`, which the app registers under a cron
+    (`onSchedule('* * * * *', drainTasks)`). That gives apps that do not use Queues background work with minute
+    granularity.
+- `ghuri db_worker [--queue-name …] [--interval 1] [--batch 1] [--max-tasks N] [--worker-id …] [--beat]` (Node,
+  `@ghuri/tasks/commands`). It stops after the current task on SIGTERM and records its id in `workerIds`.
+- `ghuri prune_db_task_results [--min-age-days 14] [--only-complete]` as in django-tasks.
+- A task found `RUNNING` past `OPTIONS.STALE_AFTER` (default 1 h; its worker died) is retried or failed by the next
+  worker.
+
+### 20.4 Periodic tasks (Ghuri; Django has none)
+
+- `periodicTask(cron, task, { args?, inline? })` registers an `onSchedule(cron)` handler that enqueues the task (or
+  runs it in the handler with `inline: true`). The task is enqueued with `runAfter` unset and the carriers of
+  no request.
+- **Workers:** the cron must be listed in `triggers.crons`. `ghuri check` reports `tasks.E003` for one that is
+  missing.
+- **Node:** core gains a scheduler in `@ghuri/core/node`, `startScheduler(app)`, which fires every cron registered
+  with `onSchedule` (using `croner`, Node-only). `serve({ scheduler: true })` and `ghuri db_worker --beat` start it.
+  Like Celery beat, **run it in exactly one process**. This also makes plain `onSchedule()` work on Node, which it
+  does not today.
+
+### 20.5 Signals and admin
+
+- Signals (`@ghuri/tasks`): `taskEnqueued` (sender: backend class, `{ taskResult }`), `taskStarted`, `taskFinished`
+  (`{ taskResult }`, status final). Same names as Django's `task_enqueued` / `task_started` / `task_finished`.
+- `@ghuri/tasks/admin` registers `DBTaskResult`:
+  - read-only, with list filters on status, queue and task, and search by id;
+  - actions "Run again" (enqueue a copy) and "Mark failed".
+
+### 20.6 Settings and checks
+
+```ts
+TASKS: {
+  default: cloudflareQueues({ queues: { default: 'TASKS_QUEUE' } }) | database() | immediate() | dummy(),
+  // per backend: QUEUES (allowed queue names; default ['default']), OPTIONS
+}
+```
+Missing `TASKS` means `{ default: immediate() }`, as Django.
+
+Checks:
+- `tasks.E001` unknown backend.
+- `tasks.E002` a task's `queueName` is not in its backend's `QUEUES`.
+- `tasks.E003` a periodic cron is not in wrangler.jsonc.
+- `tasks.W001` `immediate()` with `DEBUG = false`.
+- `tasks.W002` Queues `max_retries` is below a task's `maxAttempts - 1`.
+- `tasks.W003` `database()` without the `tasks` app.
+
+Errors (extend `GhuriError`): `InvalidTask`, `InvalidTaskBackend`, `TaskResultDoesNotExist`, `TaskResultMismatch`,
+`TaskResultNotReady`.
+
+### 20.7 Testing
+
+- `@ghuri/tasks/testing`:
+  - `useTaskBackend(dummy())` for a test, then `backend.results`, `backend.clear()`;
+  - `await backend.runPending()` (Ghuri: runs the stored tasks in-process, with carriers and retries);
+  - `captureTasks(fn)` returns the tasks enqueued while `fn` ran.
+- Package tests:
+  - the database backend on SQLite, PGlite and D1 (Miniflare), including concurrent claims on PGlite;
+  - `cloudflareQueues` against Miniflare queues (send, delay, retry, final failure, carriers).
+- `examples/blog` adds `notifySubscribers` and a nightly cleanup. `scripts/portability.sh` runs one task through the
+  database backend on Node + Postgres and through Queues on Workers.
+
+### 20.8 Changes in other packages
+
+| Package | Change |
+|---|---|
+| core | `AppConfig.tasks`, registered at populate through an `onPopulate` hook; `startScheduler(app)` and `serve({ scheduler })` in `@ghuri/core/node` |
+| agents | `agent.enqueue()` becomes the task `agents.run` when `@ghuri/tasks` is installed (retries, results, the database backend on Node); `consumeAgentQueue` stays for one minor version, deprecated |
+| mail | optional `sendMail({ …, defer: true })` via a `mail.send` task (phase 2) |
+| cli | `startproject` adds `TASKS` settings and, with `--cloudflare`, the Queue producer/consumer and an empty `triggers.crons`; `startapp` adds an empty `tasks.ts` and `tasks = tasks` in `app.ts` |
+| docs | topic "Background tasks", `django.tasks` and Celery cheat-sheet rows, Cloudflare Queues deployment section |
+
+### 20.9 Phases
+
+1. **0.1**:
+   - `task()`, `Task`, `TaskResult`, signals;
+   - `immediate`, `dummy`, `cloudflareQueues` and `database` backends, `db_worker`, `prune_db_task_results`;
+   - the `tasks` app with admin, periodic tasks, the core Node scheduler, testing helpers, checks, the blog example.
+2. **0.2**: agents on tasks, `mail` deferred sending, unique tasks (`unique: (args) => key`, skipped while one is
+   pending), task chaining (`.then(otherTask)`).
+3. **Later**: Redis backend, AWS SQS backend, Cloudflare Workflows for durable multi-step tasks, rate limits per queue.
+
+### 20.10 Open questions (proposed answers)
+
+- **Default retries.** Django has none, so `maxAttempts` defaults to 1. *Proposed:* keep 1. Queued agent runs set 3.
+- **Command name.** `db_worker` (django-tasks) breaks Ghuri's habit of commands without underscores. *Proposed:*
+  keep `db_worker` and `prune_db_task_results` for parity, and add `ghuri worker` as an alias that picks the worker
+  for the default backend.
+- **Results on Queues.** Writing a `DBTaskResult` row per task costs three D1 writes. *Proposed:* on when the `tasks`
+  app is installed. `cloudflareQueues({ results: false })` turns it off for high-volume, fire-and-forget queues.
+
+### 20.11 As built (supersedes 20.1–20.10 where they conflict)
+
+- **Peers:** `@ghuri/orm` is required (the `DBTaskResult` model is in the main entry); `@ghuri/admin` is optional
+  (`@ghuri/tasks/admin`). The main entry imports nothing Node-only; `db_worker --beat` and the wrangler checks use
+  dynamic imports with computed specifiers.
+- **Names:** `task.modulePath` is the id (`'blog.notifySubscribers'`); `task.name` is the export name, as Django's
+  `name` is the function name. `runAfter` is not a `task()` option, only `using({ runAfter })` (as Django), and is
+  a `Date` or seconds after enqueue.
+- **Backend flags** follow Django's table: `immediate()` supports priority (no effect), not defer or `getResult()`;
+  `dummy()` supports defer and priority, not `getResult()`. Unsupported `getResult()` throws `NotImplementedError`
+  (exported). Flags are getters, so `cloudflareQueues()` reports `supportsGetResult` only when results are stored.
+- **`TaskError`** is `{ exceptionClassPath, traceback }` (class name, stack).
+- **Table:** column `task_path` (django-tasks' name), plus `max_attempts`, `attempts`, `carried`; index
+  `tasks_dbtaskresult_ready_idx (status, queue_name, priority)`. Ids are UUIDv7, strictly increasing per process, so
+  tasks enqueued in one millisecond run in enqueue order.
+- **Claiming** is a compare-and-set `UPDATE … WHERE pk = ? AND status = 'READY'` after selecting the next row
+  (priority desc, `enqueuedAt`, id), not `SKIP LOCKED`: one code path for Postgres, SQLite and D1. Racing workers are
+  tested on all three. `database({ database, staleAfter })`.
+- **Queues:** the maximum `delaySeconds` is 24 hours (not 12); the default consumer `max_retries` is 3. The consumer
+  is one `onQueue('*')` registered by `cloudflareQueues()`. A message that is not a task is left to other handlers,
+  and retried when the queue has no other handler (core's rule for unhandled queues).
+- **Checks:** `tasks.E004` (was W003) for `database()` without the app, plus `tasks.E005` (producer binding missing
+  from wrangler.jsonc) and `tasks.W004` (queue without a consumer).
+- **Commands:** `db_worker [--backend] [--queue-name] [--interval] [--batch] [--max-tasks] [--worker-id] [--beat]`;
+  `prune_db_task_results [--backend] [--queue-name] [--min-age-days] [--only-failed] [--dry-run]`. The `ghuri
+  worker` alias is not built.
+- **Core** (unreleased): `parseCron` / `isValidCron` with Cloudflare semantics (UTC, day of week 1-7 with 1 = Sunday,
+  names, `L`, `W`, `#`; both day fields restricted → either matches), `startScheduler(app, opts)` and
+  `serve({ scheduler })` in `@ghuri/core/node`, `taskHandlers.crons()`, `AppConfig.tasks`.
+- **Not yet (phase 1 leftovers):** agents still use their own queue code; CLI templates, `examples/blog` and
+  `scripts/portability.sh` are not updated; Queues are tested with fake bindings through `app.queue()`, not
+  end to end in Miniflare.
