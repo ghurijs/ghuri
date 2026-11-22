@@ -49,7 +49,13 @@ export default defineSettings((env) => ({
 | `MAX_STEPS` | `10` | Tool round trips per run |
 | `AUTHENTICATION_CLASSES` | `REST_FRAMEWORK.DEFAULT_AUTHENTICATION_CLASSES` | Chat and MCP endpoints |
 | `PERMISSION_CLASSES` | `[IsAuthenticated]` | For agents without `permissionClasses`, and the MCP endpoint |
-| `QUEUE_BINDING` | `'AGENTS_QUEUE'` | Queue producer used by `agent.enqueue()` |
+| `ENQUEUE` | `'tasks'` when `@ghuri/tasks` is loaded and `QUEUE_BINDING` is unset, else `'queue'` | How `agent.enqueue()` runs in the background |
+| `TASK` | `{}` | `'tasks'` mode: `{ backend, queueName, priority }` of the `agents.run` task |
+| `QUEUE_BINDING` | `'AGENTS_QUEUE'` | `'queue'` mode: Queue producer used by `agent.enqueue()`; setting it selects `'queue'` mode |
+| `USAGE_LIMITS` | none | Token budgets per UTC day/month for `user`, `tenant`, `anon` (see Usage limits) |
+| `TRACE_RUNS` | `false` | Save a `Run` row per run (`{ messages: true }` also stores prompts and answers) |
+| `STRICT_TOOL_INPUT` | `false` | Validate tool arguments against their schemas before tools run |
+| `CONVERSATION_MODEL` | `'agents.Conversation'` | Swappable conversation model (`'app_label.Model'`), set before the first migrate |
 
 No other keys exist. Without `PROVIDERS` keys, `anthropic:` / `openai:` read `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` from env.
 
@@ -223,7 +229,39 @@ const s = await new SupportAgent().stream('Hi', { user })
 
 Memory: with `AgentsConfig` installed each run creates/extends a `Conversation` (UUID pk, `user`, `agent`, `title`, `metadata`) with `Message` rows (`role`, JSON `content`). Another user's id -> `ConversationNotFound` (404). Helpers: `createConversation`, `getConversation`, `loadMessages`, `saveMessages`, `memoryAvailable`. Not registered in the admin automatically.
 
-Queues (Cloudflare): `wrangler.jsonc` `"queues": { "producers": [{ "binding": "AGENTS_QUEUE", "queue": "agents" }], "consumers": [{ "queue": "agents" }] }`, then `agents.consumeQueue('agents')` once (e.g. in an `AppConfig.ready()`), and `const { conversationId } = await agents.create('support').enqueue('Summarize my week', { user })`. Lower level: `enqueueRun(agent, input, opts)`, `consumeAgentQueue(queue, create)` (built on `onQueue` from `@ghuri/core`).
+Background runs (0.1.0-alpha.6+): with `@ghuri/tasks` installed (`TasksConfig` + `TASKS`, see tasks.md), `enqueue()` runs the agent as the `agents.run` task on the `TASKS` backend, 3 attempts, and returns its result:
+
+```ts
+const { conversationId, taskResult } = await agents.create('support').enqueue('Summarize my week', { user })
+await taskResult.refresh()                       // later: status READY / RUNNING / SUCCESSFUL / FAILED
+taskResult.returnValue                           // { conversationId, text, finishReason } once SUCCESSFUL
+```
+
+The worker finds the agent by its router name (`AgentRouter.register()`); for an agent enqueued without a router call `registerAgent('name', AgentClass)` in a module the worker loads. Route the task with `AGENTS.TASK: { queueName: 'agents' }`. Messages are saved only when a run finishes, so retries don't duplicate them (tools that ran before a model error do run again).
+
+Without `@ghuri/tasks` (or with `AGENTS.QUEUE_BINDING` set, or `AGENTS.ENQUEUE: 'queue'`) `enqueue()` sends a Cloudflare Queue job instead: `wrangler.jsonc` `"queues": { "producers": [{ "binding": "AGENTS_QUEUE", "queue": "agents" }], "consumers": [{ "queue": "agents" }] }`, then `agents.consumeQueue('agents')` once (e.g. in an `AppConfig.ready()`). Lower level: `enqueueRun(agent, input, opts)`, `consumeAgentQueue(queue, create)` (built on `onQueue` from `@ghuri/core`).
+
+## Usage limits
+
+Token budgets (input + output tokens) per UTC day and month, so one user or tenant can't run up the model bill. Needs `AgentsConfig` and `npx ghuri migrate` (table `agents_usage`).
+
+```ts
+AGENTS: {
+  USAGE_LIMITS: {
+    user: { day: 200_000, month: 2_000_000 },
+    tenant: (subject) => planLimits(subject.key),   // function: UsageLimits | null (null = no limit)
+    anon: { day: 20_000 },                          // per client address
+  },
+  // or one function for every scope: USAGE_LIMITS: (subject) => ...  (subject: { scope, key, user })
+}
+```
+
+- Checked before every run starts (`run()`, `stream()`, the chat view, MCP `ask_<agent>`, `enqueue()`, the queued run) and counted when it ends. Only the scopes you name are counted; nothing happens without the setting.
+- Over the limit: `run()` / `enqueue()` throw `UsageLimitExceeded` (`subject`, `period`, `limit`, `used`, `resetsAt`, `wait`); the chat view answers `429` with `Retry-After` (`usageThrottled(err)` builds the `Throttled`); MCP returns an `isError` result.
+- Read usage for a "used X of Y" UI: `await getUsage({ user })` or `GET <agents prefix>/usage/` (`UsageView`) -> `{ used, limit, remaining, resetsAt }` per scope and period.
+- Signals `usageLimitReached`, `usageRecorded`; `import '@ghuri/agents/admin'` shows `Usage` and `Run`.
+- Plan limits from `@ghuri/billing`: `tenant: usageLimits('agentTokens')` (or the whole setting); see billing.md.
+- Soft limit: runs that start together pass the same check, and the run that crosses the limit finishes.
 
 ## Testing (examples/blog/src/blog/tests.ts)
 
@@ -263,3 +301,5 @@ Or set `model` to a `MockLanguageModelV4` instance from `ai/test` directly.
 - Mount MCP with a trailing slash and give clients that exact URL (`APPEND_SLASH` only redirects GET).
 - Forgetting `AgentsConfig` disables memory silently; passing `conversationId` then raises `ImproperlyConfigured`.
 - Install `ai` and `zod` (and the provider package) alongside `@ghuri/agents`.
+- `enqueue()` with `@ghuri/tasks` returns `taskResult`; without it (or with `QUEUE_BINDING`) there is no `taskResult`, only `conversationId`. Don't call `consumeQueue()` in tasks mode.
+- Don't count tokens yourself or wrap `run()` in your own budget check: set `AGENTS.USAGE_LIMITS` and catch `UsageLimitExceeded`.
