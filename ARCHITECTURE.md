@@ -1856,6 +1856,10 @@ Errors (extend `GhuriError`): `InvalidTask`, `InvalidTaskBackend`, `TaskResultDo
   Queue path. It returns `{ conversationId, taskResult, taskResultId }`. Workers find agents by name in a global
   registry filled by `AgentRouter.register()` / `registerAgent()`. `consumeAgentQueue` is **not** deprecated: it is
   the background path without `@ghuri/tasks`.
-- **Not yet (phase 1 leftovers):** CLI templates, `examples/blog` and
-  `scripts/portability.sh` are not updated; Queues are tested with fake bindings through `app.queue()`, not
-  end to end in Miniflare.
+- **CLI and example:** `startproject` installs `TasksConfig` with `TASKS: { default: env.TASKS_QUEUE ?
+  cloudflareQueues(...) : database() }` (`database()` for `--db sqlite`), an `npm run worker` script, a
+  `<name>-tasks` queue and an empty `triggers.crons` in `wrangler.jsonc`; `startapp` writes `tasks.ts` and
+  `tasks = tasks`. Generated code does not use `serve({ scheduler })` while the template's core range predates it.
+  `examples/blog` has `publishPost` / `purgeRejectedComments` (periodic, `0 3 * * *`), background agent runs, and
+  `scripts/portability.sh` runs a task with `ghuri db_worker` on PGlite before serving on Node.
+- **Not yet:** Queues are tested with fake bindings through `app.queue()`, not end to end in Miniflare.
