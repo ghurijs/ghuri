@@ -252,6 +252,26 @@ await assertTenantIsolation({ tenants: [storeA, storeB], run: () => listOrdersFo
 
 Requests resolve the tenant through `TenantMiddleware`: send the header or `Host` your resolvers read. See tenants.md.
 
+## Background tasks (`@ghuri/tasks/testing`)
+
+```ts
+import { runWorker } from '@ghuri/tasks'
+import { captureTasks, dummy, useTaskBackend } from '@ghuri/tasks/testing'
+
+const { backend, restore } = useTaskBackend(dummy({ queues: [] }))   // replaces TASKS.default
+try {
+  await sendReceipt.enqueue(order.pk)
+  expect(backend.results).toHaveLength(1)
+  await backend.runPending()                                         // run them in-process
+} finally {
+  restore()
+}
+const enqueued = await captureTasks(() => api.post('/api/orders/', data))
+await runWorker({ batch: true })                                     // with database(): run what is ready
+```
+
+`TasksConfig` must be in `INSTALLED_APPS` for `setupTestDatabase()` to create `tasks_dbtaskresult`. See tasks.md.
+
 ## Commands, cron, queues, signals
 
 ```ts

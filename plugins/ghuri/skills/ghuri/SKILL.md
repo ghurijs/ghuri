@@ -1,11 +1,11 @@
 ---
 name: ghuri
-description: Write correct code for Ghuri, the Django-style TypeScript framework (Hono + Drizzle, Cloudflare Workers with D1/R2 by default, Node + Postgres too). Use whenever package.json depends on @ghuri/* packages (@ghuri/core, @ghuri/orm, @ghuri/auth, @ghuri/rest, @ghuri/admin, @ghuri/graphql, @ghuri/realtime, @ghuri/storage, @ghuri/agents, @ghuri/oauth, @ghuri/socialauth, @ghuri/mail, @ghuri/tenants, @ghuri/cli), files import from them, package.json has a "ghuri" key or `ghuri` scripts, or the user mentions Ghuri. Covers models, queries, migrations, settings, URLs, views, middleware, REST serializers/viewsets/routers, admin, auth, permissions, social login (GitHub/Google/OIDC), OAuth/OIDC/magic-link login strategies (Passport-style), GraphQL, WebSockets, file storage, email, multi-tenancy/SaaS, AI agents/MCP, signals, cache, cron/queues, management commands, tests and deployment. Ghuri is NOT Python Django, DRF, Prisma or plain Hono, even though names look like Django's; do not write Python or snake_case APIs.
+description: Write correct code for Ghuri, the Django-style TypeScript framework (Hono + Drizzle; Cloudflare Workers with D1/R2 by default, Node + Postgres too). Use whenever package.json depends on @ghuri/* packages (core, orm, auth, rest, admin, graphql, realtime, storage, agents, oauth, socialauth, mail, tenants, tasks, vectors, billing, cli), files import from them, package.json has a "ghuri" key or `ghuri` scripts, or the user mentions Ghuri. Covers models, queries, migrations, settings, URLs, views, middleware, REST serializers/viewsets/routers, admin, auth, permissions, social login and OAuth/OIDC/magic-link strategies, GraphQL, WebSockets, file storage, email, multi-tenancy/SaaS, AI agents/MCP and token usage limits, background tasks, cron/queues, embeddings/vector search/RAG, Stripe subscriptions, signals, cache, commands, tests and deployment. Ghuri is NOT Python Django, DRF, Prisma or plain Hono, even though names look like Django's; do not write Python or snake_case APIs.
 ---
 
 # Ghuri
 
-Ghuri is "Django for TypeScript": `settings.ts` with `INSTALLED_APPS`, apps with models, migrations, `urls.ts`, class-based views, an admin, a DRF-style REST framework, graphene-style GraphQL, Channels-style WebSockets, file storage, `django.core.mail`-style email, shared-schema multi-tenancy, auth and AI agents. It is built on Hono and Drizzle and runs on Cloudflare Workers (D1, R2, KV, Queues, Durable Objects) by default, and on Node with Postgres with the same code.
+Ghuri is "Django for TypeScript": `settings.ts` with `INSTALLED_APPS`, apps with models, migrations, `urls.ts`, class-based views, an admin, a DRF-style REST framework, graphene-style GraphQL, Channels-style WebSockets, file storage, `django.core.mail`-style email, shared-schema multi-tenancy, auth, AI agents, `django.tasks`-style background tasks, vector search for RAG and Stripe subscriptions. It is built on Hono and Drizzle and runs on Cloudflare Workers (D1, R2, KV, Queues, Durable Objects) by default, and on Node with Postgres with the same code.
 
 It is brand new, so your instincts are wrong in predictable ways: the names are Django's, but the syntax is TypeScript, options are camelCase, everything that touches the database is `async`, and nothing is discovered by file name. Read the reference file for the area you touch before writing code (index at the bottom).
 
@@ -46,7 +46,8 @@ It is brand new, so your instincts are wrong in predictable ways: the names are 
 | `class PostAdmin(admin.ModelAdmin): list_display = (...)` | `class PostAdmin extends ModelAdmin<Post> { listDisplay = [...] }` |
 | `send_mail(subject, message, from_email, [to])` | `await sendMail(subject, message, fromEmail, [to])` (`@ghuri/mail`) |
 | `@receiver(post_save, sender=Post)` | `postSave.connect(async ({ instance, created }) => {...}, { sender: Post })` |
-| Celery / cron | `onQueue('emails', fn)` / `onSchedule('0 3 * * *', fn)` (`@ghuri/core`) + wrangler config |
+| Django 6 `@task` / Celery `.delay()` | `export const t = task(fn)` in `tasks.ts` + `await t.enqueue(...)` (`@ghuri/tasks`) |
+| Celery beat / cron | `periodicTask('0 3 * * *', t)` (`@ghuri/tasks`), low level `onSchedule` / `onQueue` (`@ghuri/core`) + wrangler config |
 | `TestCase`, `self.client` | Vitest via `npx ghuri test`, `setupTestDatabase()`, `APIClient` |
 
 ## Golden rules
@@ -118,6 +119,18 @@ It is brand new, so your instincts are wrong in predictable ways: the names are 
 **Make the app multi-tenant** (tenants.md)
 `npm install @ghuri/tenants@next`; keep the tenant (`Store`, `Organization`) a plain `Model`; `export const StoreModel = tenantModel({ field: 'store', to: () => Store, uuidPk: true })` and build every tenant-owned model with `StoreModel({...})` (unique constraints start with `'store'`); `TenantMiddleware` in `MIDDLEWARE` and `TENANTS: { MODEL: 'stores.Store', RESOLVERS: [new SubdomainResolver({ domain }), new HostResolver()] }`; `makemigrations` + `migrate`. Queries then filter to the request's tenant and throw `TenantNotSet` with none; background jobs use `runAsTenant(store, fn)`, platform code `withoutTenant(fn)` / `Model.unscoped`. Check membership in a permission class; prove isolation with `assertTenantIsolation()` from `@ghuri/tenants/testing`.
 
+**Run work in the background** (tasks.md)
+`TasksConfig` in `INSTALLED_APPS`, `TASKS: { default: env.TASKS_QUEUE ? cloudflareQueues({ queues: { default: 'TASKS_QUEUE' } }) : database() }`, `migrate`. In `src/<app>/tasks.ts`: `export const sendReceipt = task(async (orderId: number) => {...}, { maxAttempts: 3 })`, and `tasks = tasks` on the AppConfig. Enqueue with `await sendReceipt.enqueue(order.pk)` (JSON args: pass pks), defer with `.using({ runAfter: 600 })`, schedule with `periodicTask('0 3 * * *', t)` in `ready()`. On Workers add the queue producer/consumer and crons to `wrangler.jsonc`; on Node run `npx ghuri db_worker` (one process with `--beat`). Tests: `useTaskBackend(dummy())` from `@ghuri/tasks/testing`.
+
+**Add retrieval / RAG** (vectors.md)
+`VectorsConfig` in `INSTALLED_APPS` + `migrate`; `VECTORS: { default: env.VECTORIZE ? vectorize('VECTORIZE', { embedding: 'workers-ai:@cf/baai/bge-base-en-v1.5' }) : pgvector({ database: 'default', embedding: 'openai:text-embedding-3-small' }) }`. Define indexes at module top level (`new VectorIndex('support.handbook', { chunk: { size: 800, overlap: 150 } })`, or `ModelIndex` to keep model rows in sync on save/delete) in a module the AppConfig loads (`modules = { vectors }`); `await handbook.index([{ key, text, metadata }])`, `await handbook.search(query, { k: 5, filter: {...} })`. Give agents `searchTool(handbook, {...})` from `@ghuri/vectors/agents`. With `@ghuri/tenants`, indexes are tenant-scoped and fail closed.
+
+**Charge for subscriptions** (billing.md)
+`BillingConfig` in `INSTALLED_APPS` + `migrate`; `BILLING: { PROVIDER: stripe({ secretKey: env.STRIPE_SECRET_KEY, webhookSecret: env.STRIPE_WEBHOOK_SECRET }), PLANS: { free: {...}, pro: { prices: ['pro_monthly'], features: [...], limits: {...} } }, DEFAULT_PLAN: 'free' }` (bill tenants with `SUBSCRIBER_MODEL`); `path('billing/', include(billingUrls))` gives `checkout/`, `portal/` and the verified, idempotent `webhook/`. Gate features with `getSubscription()`, `hasFeature()`, `getEntitlements()`, `HasActiveSubscription` / `HasFeature` from `@ghuri/billing/rest`; feed plan limits to agents with `AGENTS: { USAGE_LIMITS: { tenant: usageLimits('agentTokens') } }`. No Stripe SDK; test with `fakeStripe()` from `@ghuri/billing/testing`.
+
+**Limit agent token usage** (agents.md)
+`AGENTS: { USAGE_LIMITS: { user: { day: 200_000, month: 2_000_000 }, tenant: (subject) => planLimits(subject.key), anon: { day: 20_000 } } }` with `AgentsConfig` installed and migrated. Runs over budget throw `UsageLimitExceeded` (HTTP 429 with `Retry-After`); show usage with `getUsage({ user })` or `GET <agents>/usage/`.
+
 **Deploy to Cloudflare** (deployment.md)
 `npx wrangler d1 create <name>` and paste `database_id`; `npx wrangler r2 bucket create <bucket>`; `npx wrangler secret put SECRET_KEY`; `npx ghuri check --deploy`; `npx ghuri deploy --migrate` (or `npx ghuri migrate --remote` then `wrangler deploy`). Keep `nodejs_compat`.
 
@@ -142,6 +155,9 @@ Add `pg: postgres({ url: env.DATABASE_URL })` (or `{ hyperdrive: 'HYPERDRIVE' }`
 - Storing per-connection data on `this` in a consumer (rebuilt per event: use `this.state`); `memoryLayer()` on Workers.
 - Email: `sendMail({ to, subject, html })` or `sendMail(to, subject, body)` (the order is `subject, message, fromEmail, recipientList, options`), `EMAIL_BACKEND` as a string, `attachFile()`, nodemailer, or `@ghuri/mail/smtp` in Worker code.
 - Multi-tenancy: a hand-made `ForeignKey(() => Store)` on a plain `Model()` instead of the `tenantModel()` factory (not scoped); calling `objects` in platform code with no tenant (throws `TenantNotSet`: use `withoutTenant()` / `unscoped`); treating the resolved tenant as proof the user may access it; schema-per-tenant (django-tenants) does not exist.
+- Background jobs: Celery, BullMQ, `node-cron`, `setTimeout` in a request, or `env.QUEUE.send()` from app code instead of `task()` + `enqueue()`; forgetting `tasks = tasks` on the AppConfig (`InvalidTask: has no name`); passing model instances or `Date`s as task arguments; Unix cron day numbers (Cloudflare: 1 = Sunday).
+- RAG: LangChain / LlamaIndex / Pinecone clients, `env.VECTORIZE.query()` in app code, raw `CREATE EXTENSION vector` tables, or creating `VectorIndex`es inside request handlers (define them at module top level so commands and workers find them by name).
+- Billing: the `stripe` npm SDK, `process.env.STRIPE_SECRET_KEY` in app code, your own webhook route or signature check, granting access from the Checkout success redirect instead of the synced `Subscription`, or keys in code (they come from `env` in settings).
 - Importing `CharField` from `@ghuri/orm` into a serializer (use `@ghuri/rest`), or token/JWT auth from `@ghuri/rest` (use `@ghuri/auth/rest`).
 
 ## Reference files (read before working in that area)
@@ -161,8 +177,11 @@ Add `pg: postgres({ url: env.DATABASE_URL })` (or `{ hyperdrive: 'HYPERDRIVE' }`
 | references/storage.md | `FileField`/`ImageField`, storage backends (R2/S3/fs/memory), uploads, serving media |
 | references/mail.md | sending email: `sendMail`, `EmailMessage`, attachments/HTML, `EMAIL_BACKEND` (Cloudflare Email, Resend, SMTP, console), custom backends, `outbox` tests |
 | references/tenants.md | multi-tenant / SaaS apps: `tenantModel()`, `objects` vs `unscoped`, `runAsTenant`/`withoutTenant`, `TenantMiddleware` + resolvers, `TENANTS`, write checks, `tenantCache`, leak tests |
-| references/agents.md | `Agent`, `@tool`, `ModelTools`/`ViewSetTools`/`RouterTools`, `AgentRouter`, MCP endpoints, providers |
-| references/signals-cache-tasks-commands.md | signals, cache API, cron (`onSchedule`) and queues (`onQueue`), custom management commands |
+| references/agents.md | `Agent`, `@tool`, `ModelTools`/`ViewSetTools`/`RouterTools`, `AgentRouter`, MCP endpoints, providers, background runs, token usage limits |
+| references/tasks.md | background tasks: `task()`, `enqueue()`, results, `TASKS` backends (Queues, database, immediate, dummy), retries, `periodicTask`, `db_worker`, testing |
+| references/vectors.md | embeddings, vector stores (`VECTORS`: Vectorize, pgvector, database, memory), `VectorIndex`/`ModelIndex`, chunking, search and filters, tenant scoping, agent search tool, commands, testing |
+| references/billing.md | subscriptions: `BILLING`, `stripe()`, plans and entitlements, checkout/portal/webhook views, `getSubscription`/`hasFeature`, REST permissions, `usageLimits()` for agents, signals, admin, `fakeStripe()` tests |
+| references/signals-cache-tasks-commands.md | signals, cache API, low-level cron (`onSchedule`) and queues (`onQueue`), the Node scheduler, custom management commands |
 | references/testing.md | writing or running tests, test databases, `APIClient`, test client, query counting |
 | references/cli.md | any `ghuri` command and its flags, how the CLI loads the project, the `ghuri mcp` server |
 | references/deployment.md | `wrangler.jsonc`, deploying to Workers, secrets, Node + Postgres, Docker, D1 -> Postgres |

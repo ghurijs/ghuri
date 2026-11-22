@@ -2,6 +2,8 @@
 
 Covers `Signal`/`receiver` (`@ghuri/core`) and the ORM/auth signals, the cache API (`cache`, `caches`, `CACHES`, backends), Cron Triggers and Queues (`onSchedule`, `onQueue`), and custom `ghuri` commands (`BaseCommand`, `callCommand`).
 
+**For application background jobs use `@ghuri/tasks` (tasks.md)**: `task()`, `await t.enqueue(...)`, results, retries and `periodicTask()` on Queues, the database or in-process. `onSchedule` / `onQueue` below are the low-level hooks it is built on; use them directly only for raw queue messages or custom cron handlers.
+
 ## Django habit -> Ghuri
 
 | Django | Ghuri |
@@ -17,8 +19,8 @@ Covers `Signal`/`receiver` (`@ghuri/core`) and the ORM/auth signals, the cache A
 | `cache.get_or_set('k', fn, 300)` | `await cache.getOrSet('k', fn, 300)` |
 | `caches['pages']` | `caches.get('pages')` |
 | `CACHES = {'default': {'BACKEND': '...'}}` | `CACHES: { default: kvCache('CACHE') }` |
-| Celery beat / crontab | `onSchedule('0 * * * *', fn)` + `triggers.crons` in `wrangler.jsonc` |
-| Celery task + `.delay()` | `await getEnv().EMAILS.send(body)` + `onQueue('emails', fn)` |
+| Celery beat / crontab | `periodicTask('0 * * * *', myTask)` (`@ghuri/tasks`), or low level `onSchedule('0 * * * *', fn)`; plus `triggers.crons` in `wrangler.jsonc` |
+| Celery task + `.delay()` / Django 6 `@task` | `task(fn)` + `await myTask.enqueue(...)` (`@ghuri/tasks`, tasks.md); low level: `await getEnv().EMAILS.send(body)` + `onQueue('emails', fn)` |
 | `management/commands/x.py` auto-discovery | `commands = { x: XCommand }` on the `AppConfig` |
 | `add_arguments(self, parser)` | `addArguments(parser) { parser.argument(...).option(...) }` |
 | `handle(self, *args, **options)` | `async handle(args, io)` |
@@ -140,6 +142,8 @@ export async function demo() {
 - No `@cache_page` / per-view cache decorator; for public pages prefer `Cache-Control` headers and Cloudflare's CDN.
 
 ## Background tasks (Cron Triggers, Queues)
+
+Low-level hooks. Prefer `@ghuri/tasks` (tasks.md) for jobs you enqueue from app code. On Node, `serve(app, { scheduler: true })` or `startScheduler(app)` from `@ghuri/core/node` fires the `onSchedule` crons (UTC, Cloudflare syntax: day of week 1-7 with 1 = Sunday); run it in one process.
 
 `createApp(settings)` returns `{ fetch, scheduled, queue }`, a complete Workers module handler; `export default createApp(settings)` wires everything. If you export your own object (e.g. alongside a Durable Object class), forward all three methods.
 
