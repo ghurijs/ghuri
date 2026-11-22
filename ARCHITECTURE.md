@@ -1863,3 +1863,781 @@ Errors (extend `GhuriError`): `InvalidTask`, `InvalidTaskBackend`, `TaskResultDo
   `examples/blog` has `publishPost` / `purgeRejectedComments` (periodic, `0 3 * * *`), background agent runs, and
   `scripts/portability.sh` runs a task with `ghuri db_worker` on PGlite before serving on Node.
 - **Not yet:** Queues are tested with fake bindings through `app.queue()`, not end to end in Miniflare.
+
+---
+
+## 21. `@ghuri/vectors` (embeddings, vector stores and retrieval)
+
+Status: **0.1 built** (see 21.11 for where it differs from this text). Repo `ghurijs/vectors`, npm `@ghuri/vectors`,
+peers `@ghuri/core` and `@ghuri/orm` (required) and `@ghuri/agents` (optional: `@ghuri/vectors/agents`).
+
+AI SaaS apps need retrieval: embed documents, store the vectors, find the chunks closest to a question and hand them
+to a model. D1 has no vector type, so Cloudflare apps use **Vectorize**; Node apps use **pgvector**. Ghuri puts both
+behind adapters chosen in settings, like `CACHES` and `TASKS`, so the same app code runs on Workers + D1 + Vectorize
+and on Node + Postgres + pgvector.
+
+Django has no vector store. The closest analogues, whose names Ghuri borrows, are:
+
+- **django-haystack** for indexes of models: `SearchIndex` → `ModelIndex`, `index_queryset` → `indexQueryset`,
+  the realtime signal processor → `autoIndex`, and the commands `update_index`, `clear_index` and `rebuild_index`;
+- **pgvector-python** (`pgvector.django`) for pgvector: `vector(n)` columns, the `hnsw` / `ivfflat` index types with
+  `m`, `ef_construction` and `lists`, and the `vector_cosine_ops` / `vector_l2_ops` / `vector_ip_ops` opclasses.
+  Its `VectorField` and `CosineDistance` / `L2Distance` / `MaxInnerProduct` belong to phase 2 (21.9).
+
+```ts
+// src/settings.ts
+import { pgvector, vectorize, VectorsConfig } from '@ghuri/vectors'
+export default defineSettings((env) => ({
+  INSTALLED_APPS: [..., VectorsConfig],          // the document manifest (and the databaseStore() table)
+  VECTORS: {
+    default: env.VECTORIZE
+      ? vectorize('VECTORIZE', { embedding: 'workers-ai:@cf/baai/bge-base-en-v1.5' })      // Workers
+      : pgvector({ database: 'default', embedding: 'openai:text-embedding-3-small' }),     // Node + Postgres
+  },
+}))
+```
+```jsonc
+// wrangler.jsonc
+"vectorize": [{ "binding": "VECTORIZE", "index_name": "mysite-default" }],   // wrangler vectorize create … --dimensions=768 --metric=cosine
+"ai": { "binding": "AI" }
+```
+```ts
+// src/blog/vectors.ts
+import { ModelIndex, VectorIndex } from '@ghuri/vectors'
+import { Post } from './models'
+
+export const posts = new ModelIndex(Post, {
+  name: 'blog.posts',
+  text: (post) => `${post.title}\n\n${post.body}`,
+  metadata: (post) => ({ status: post.status, authorId: post.authorId, year: post.createdAt.getFullYear() }),
+  indexQueryset: (qs) => qs.filter({ status: 'published' }),   // only these rows are indexed
+  chunk: { size: 1200, overlap: 200 },
+  // autoIndex: true — re-index on postSave / postDelete (in the background when @ghuri/tasks is installed)
+})
+
+export const handbook = new VectorIndex('blog.handbook')        // plain documents, not models
+
+// a view, a task, an agent tool…
+await handbook.index({ key: 'refunds', text: refundPolicy, metadata: { section: 'billing' } })
+const hits = await posts.search('how do I cancel?', { k: 5, filter: { status: 'published', year__gte: 2025 } })
+hits[0].object     // the Post (one inBulk query for all hits)
+hits[0].text       // the matching chunk
+hits[0].score      // cosine similarity
+
+// src/blog/agents.ts
+import { searchTool } from '@ghuri/vectors/agents'
+export class SupportAgent extends Agent {
+  tools = [searchTool(handbook, { description: 'Search the support handbook.' })]
+}
+```
+
+### 21.1 Stores
+
+A store is one vector index on one backend. Its API is Vectorize's, which every other backend implements:
+
+```ts
+type MetadataValue = string | number | boolean
+interface VectorRecord { id: string; values: number[]; namespace?: string; metadata?: Record<string, MetadataValue> }
+interface VectorMatch { id: string; score: number; namespace?: string; metadata?: Record<string, MetadataValue>; values?: number[] }
+
+interface VectorStore {
+  readonly alias: string
+  readonly backend: string                         // 'vectorize' | 'pgvector' | 'database' | 'memory'
+  readonly metric: 'cosine' | 'euclidean' | 'dot-product'
+  readonly dimensions: number | undefined
+  readonly embedding: Embedder                     // 21.2
+  upsert(records: VectorRecord[]): Promise<void>
+  query(vector: number[], opts: { topK: number; namespace?: string; filter?: Filter; returnValues?: boolean }): Promise<VectorMatch[]>
+  getByIds(ids: string[]): Promise<VectorRecord[]>
+  deleteByIds(ids: string[]): Promise<void>
+  deleteDocuments?(namespace: string, keys: string[]): Promise<void>   // native delete by document (not Vectorize)
+  clearNamespace?(namespace: string): Promise<void>
+  setup?(): Promise<void>                          // createvectortable
+  check(): CheckMessage[]
+}
+export const vectorStores: { get(alias?): VectorStore; aliases(): string[]; all(): VectorStore[]; override(alias, config) }
+```
+
+| | `vectorize(binding, opts)` | `pgvector(opts)` | `databaseStore(opts)` | `memoryStore(opts)` |
+|---|---|---|---|---|
+| Runs on | Workers (Vectorize binding) | Postgres with the `vector` extension (postgres.js, Hyperdrive, PGlite + `@electric-sql/pglite-pgvector`) | any `DATABASES` alias: D1, SQLite, Postgres | the process |
+| Search | ANN (Vectorize) | `ORDER BY embedding <=> $1` with an `hnsw` (default) or `ivfflat` index | exact, in JS, over the namespace's rows | exact, in JS |
+| Metadata filters | Vectorize filter (needs metadata indexes) | `jsonb` predicates in SQL | in JS | in JS |
+| Delete a document | through the manifest (needs the `vectors` app) | `DELETE … WHERE namespace AND document` | the same | native |
+| Table | — | `vectors_pgembedding` (raw SQL, `ghuri createvectortable`) | `vectors_vectorembedding` (model + migration) | — |
+| For | Workers production | Node production | small apps (a few thousand chunks per namespace), tests | tests, scripts |
+
+- **Options shared by all factories:** `embedding` (21.2, required unless an index sets one), `dimensions`
+  (default: known for built-in model ids, else measured on the first embedding), `metric` (default `'cosine'`).
+- **`vectorize(binding, { embedding, metric })`.** `upsert` sends batches of 500 (the binding takes 1000). Vectorize
+  is eventually consistent: a vector is searchable a few seconds after `upsert` returns (documented). Metadata filters
+  need `wrangler vectorize create-metadata-index` for each filtered key (documented, not checked).
+- **`pgvector({ database: 'default', table: 'vectors_pgembedding', dimensions, metric, index: 'hnsw' | 'ivfflat' | null, m, efConstruction, lists })`.**
+  Columns: `id text primary key`, `namespace text`, `document text`, `chunk integer`, `embedding vector(n)`,
+  `metadata jsonb`, index on `(namespace, document)`. The opclass follows the metric (`vector_cosine_ops`,
+  `vector_l2_ops`, `vector_ip_ops`).
+- **`databaseStore({ database: 'default' })`** stores embeddings as base64 float32 in a `TextField`, so it is
+  portable to every database Ghuri supports. Queries read every row of one namespace; it warns (`vectors.W002`) when
+  used with `DEBUG = false`.
+- **Scores** follow Vectorize: cosine similarity, euclidean distance (lower is closer) or the dot product. Matches are
+  always returned best first. `minScore` works for cosine and dot-product only.
+
+### 21.2 Embeddings
+
+```ts
+interface Embedder {
+  readonly modelId: string                          // 'workers-ai:@cf/baai/bge-base-en-v1.5'
+  readonly dimensions: number | undefined
+  readonly maxBatch: number
+  embed(texts: string[], opts?: { kind?: 'query' | 'document' }): Promise<number[][]>
+}
+export function resolveEmbedding(spec: string | EmbeddingModelV2 | Embedder, env?): Embedder
+export function registerEmbeddingProvider(name: string, factory: (modelId, ctx) => Embedder | Promise<Embedder>): void
+export async function embed(text, { store? }): Promise<number[]>
+export async function embedMany(texts, { store? }): Promise<number[][]>
+```
+
+- `embedding` is a `'<provider>:<model id>'` string, as agent models are (§10), an AI SDK embedding model (called
+  through its `doEmbed`, so `ai` is not a dependency), or an `Embedder`.
+- Built-in providers, none needing a package:
+  - `workers-ai:` calls the AI binding (`env[AGENTS.AI_BINDING ?? 'AI']`) as `ai.run(model, { text })`;
+  - `openai:` posts to `/v1/embeddings` (`OPENAI_API_KEY`, `baseURL` for compatible APIs);
+  - `ghuri-ai:` posts to the gateway's OpenAI-compatible `/v1/embeddings` (`GHURI_AI_URL`, `GHURI_AI_API_KEY`) with
+    the `x-ghuri-*` headers of the carried context, as agents do.
+- Provider options come from the store's `providerOptions`, then `AGENTS.PROVIDERS[name]`, then environment
+  variables. Vectors reads the `AGENTS` setting but does not import `@ghuri/agents`, so one API key serves both.
+- `prefixes: { query?, document? }` on a store or index, for models that want them (`'query: '` for e5).
+
+### 21.3 Indexes
+
+```ts
+export class VectorIndex {
+  constructor(name: string, opts?: {
+    store?: string                                // VECTORS alias, default 'default'
+    chunk?: ChunkOptions | false | ((text: string) => string[])   // default { size: 1000, overlap: 200 }
+    tenant?: 'auto' | boolean                     // 21.4, default 'auto'
+    storeText?: boolean                           // keep chunk text in metadata (default true)
+    prefixes?: { query?: string; document?: string }
+  })
+  readonly name: string
+  index(docs: Document | Document[], opts?: { namespace?; force?; background? }): Promise<IndexResult>
+  delete(keys: Key | Key[], opts?: { namespace?; background? }): Promise<void>
+  clear(opts?: { namespace? }): Promise<void>
+  search(query: string | number[], opts?: SearchOptions): Promise<SearchHit[]>
+}
+interface Document { key: string | number; text: string; metadata?: Record<string, MetadataValue> }
+interface SearchOptions { k?: number /* 4 */; filter?: Filter; exclude?: Filter; namespace?: string; minScore?: number }
+interface SearchHit { id: string; key: string; chunk: number; score: number; text: string | null; metadata: Record<string, MetadataValue> }
+
+export class ModelIndex<M> extends VectorIndex {
+  constructor(model: M, opts: VectorIndexOptions & {
+    name?: string                                  // default '<app label>.<model name>'
+    text: ((obj) => string) | string[]             // a function or field names joined with blank lines
+    metadata?: (obj) => Record<string, MetadataValue>
+    indexQueryset?: (qs) => QuerySet               // haystack's index_queryset: rows outside it are not indexed
+    autoIndex?: boolean                            // default true
+    background?: boolean | 'auto'                  // default 'auto'
+  })
+  index(objs: Instance | Instance[]): Promise<IndexResult>
+  delete(objsOrPks): Promise<void>
+  update(opts?: { batchSize?; force? }): Promise<IndexResult>     // update_index for this index
+  search(query, opts): Promise<ModelSearchHit<M>[]>                // hits with `object`; deleted rows dropped
+}
+export function getVectorIndex(name: string): VectorIndex | undefined
+export function vectorIndexes(): VectorIndex[]
+```
+
+- **Chunking.** `chunkText(text, { size, overlap, separators })` is a recursive character splitter (separators
+  `\n\n`, `\n`, `. `, ` `, then characters). Sizes are characters, not tokens (no tokenizer on Workers).
+- **Ids.** A chunk's vector id is `<sha-256 of index, namespace and key, 40 hex>-<chunk>`: at most 64 bytes
+  (Vectorize's limit) and unique across tenants and indexes sharing a store.
+- **Reserved metadata.** `_key`, `_chunk` and `_text` (when `storeText`). User keys must not start with `_`; values
+  are strings, numbers or booleans (Vectorize's types).
+- **Manifest.** With the `vectors` app installed, every indexed document has a `VectorDocument` row (`index`,
+  `namespace`, `key`, `chunks`, `digest`). `index()` skips a document whose digest (text, metadata, embedding model,
+  chunking) is unchanged, unless `force`. It deletes the chunks a shorter new version no longer has. Vectorize needs
+  the manifest to delete documents; the other stores use it only to skip unchanged documents.
+- **Order of writes.** Embed every chunk, upsert, delete stale chunks, then save the manifest row, so a failed
+  embedding call changes nothing.
+- **Filters** use Django lookups on metadata: `{ status: 'published' }`, `year__gte`, `__gt`, `__lt`, `__lte`, `__in`,
+  `__exact`, and `exclude` (one key each: `$ne` / `$nin`). They translate to Vectorize filters, `jsonb` SQL and a JS
+  matcher. An unknown lookup raises `FilterError`.
+
+### 21.4 Tenants (fail closed)
+
+- `tenant: 'auto'` scopes an index when a context carrier named `tenant` is registered, which `@ghuri/tenants`
+  does. `true` always scopes it; `false` never does (platform-wide content).
+- A scoped index takes the tenant from `captureContext().tenant` (§14), never from arguments. Without one it raises
+  `TenantRequired` for `index`, `delete`, `clear` and `search`. That includes code inside `withoutTenant()`, which
+  carries no tenant.
+- The tenant goes into the store **namespace**: `<index>|t=<tenant pk>[|<namespace>]`, hashed when longer than 64
+  bytes. On Vectorize this is native namespace isolation, so a missing metadata index cannot leak across tenants. On
+  pgvector and `databaseStore()` it is a `WHERE namespace = $1` that every query carries.
+- Background work keeps the tenant: tasks capture carriers at enqueue, and `update_index --tenant <pk>` runs inside
+  `restoreContext({ tenant })`. `ModelIndex.search()` loads objects through the model's manager, so tenant managers
+  apply as well.
+- Deliberate limit: there is no search across tenants.
+
+### 21.5 Background indexing
+
+- `@ghuri/vectors` does not import `@ghuri/tasks`. When `globalThis[Symbol.for('ghuri.tasks.interop')]` exists, an
+  `onPopulate` hook defines the task `vectors.index` (`maxAttempts: 3`), as agents define `agents.run`.
+- `background: true` enqueues it; `'auto'` enqueues when the interop exists and runs inline otherwise.
+- Jobs are JSON: `{ index, op: 'index' | 'delete', keys?, documents?, namespace? }`. Model indexes send primary
+  keys and reload the rows in the worker, so stale data is never embedded. Mind the 128 KB Queues message limit for
+  plain documents.
+- `autoIndex` connects `postSave` / `postDelete` for the model, skips `raw` saves (`loaddata`), and defers the work
+  with `onCommit`.
+
+### 21.6 Settings, commands and checks
+
+```ts
+VECTORS: { <alias>: vectorize(...) | pgvector(...) | databaseStore(...) | memoryStore(...) }
+```
+
+Missing `VECTORS` raises `ImproperlyConfigured` on first use. There is no silent in-memory default.
+
+Commands (`VectorsConfig`):
+
+| Command | Does |
+|---|---|
+| `ghuri update_index [names…] [--tenant pk] [--batch-size 100] [--force]` | index every row of each `ModelIndex` (unchanged rows skipped) |
+| `ghuri clear_index [names…] [--tenant pk]` | delete a namespace's vectors and manifest rows |
+| `ghuri rebuild_index [names…] [--tenant pk]` | clear, then update |
+| `ghuri createvectortable [--store alias]` | `CREATE EXTENSION IF NOT EXISTS vector`, the table and the ANN index of each `pgvector()` store (Django's `createcachetable`) |
+
+Checks:
+- `vectors.E001` a `VECTORS` entry is not a store.
+- `vectors.E002` an index names a store alias that is not configured.
+- `vectors.E003` `vectorize()` or `databaseStore()` without the `vectors` app.
+- `vectors.E004` a store has no embedding.
+- `vectors.E005` a `vectorize()` binding is not in wrangler.jsonc `vectorize`.
+- `vectors.W001` `memoryStore()` with `DEBUG = false`.
+- `vectors.W002` `databaseStore()` with `DEBUG = false`.
+- `vectors.W003` a `workers-ai:` embedding while wrangler.jsonc has no `ai` binding.
+
+Errors (extend `GhuriError`): `VectorsError`, `InvalidVectorStore`, `EmbeddingError`, `DimensionMismatch`,
+`FilterError`, `TenantRequired`.
+
+### 21.7 Testing
+
+- `@ghuri/vectors/testing`:
+  - `fakeEmbedding({ dimensions: 64 })`: a deterministic hashed bag-of-words embedder, so texts that share words
+    are close and tests need no network;
+  - `useVectorStore(alias, memoryStore())`;
+  - `fakeVectorize()`: an in-memory `VectorizeIndex` binding with namespaces, filters and the 64-byte limits.
+- Package tests:
+  - the index API, chunking and filters on every store;
+  - `databaseStore()` and the manifest on SQLite, PGlite and D1 (Miniflare);
+  - `pgvector()` on PGlite with `@electric-sql/pglite-pgvector`;
+  - `vectorize()` against `fakeVectorize()` (Miniflare does not simulate Vectorize; `wrangler dev` uses the remote
+    index);
+  - tenant isolation, fail-closed errors, background indexing through a stub of the tasks interop, the agents tool.
+
+### 21.8 Changes in other packages
+
+| Package | Change |
+|---|---|
+| core, orm, tasks, agents | none required. Vectors uses `captureContext()`, `apps.onPopulate`, the tasks interop, `AGENTS.*` settings and the `AgentTool` shape |
+| tenants | optional, later: publish `tenantMode()` on a `globalThis` interop so platform code inside `withoutTenant()` can be told apart from code with no tenant |
+| cli | `startproject --cloudflare` could add a `vectorize` binding and `VECTORS` (phase 2) |
+| docs | topic "Vectors and RAG" (`topics/vectors`) |
+
+### 21.9 Phases
+
+1. **0.1**:
+   - the four stores, embeddings (Workers AI, OpenAI-compatible, ghuri-ai, AI SDK models);
+   - `VectorIndex`, `ModelIndex`, chunking, filters, tenant namespaces, the manifest;
+   - background indexing, the commands, checks, testing helpers and `searchTool()`.
+2. **0.2**:
+   - an ORM `VectorField({ dimensions })` (pgvector `vector(n)`, a blob elsewhere) with pgvector-python's
+     `CosineDistance` / `L2Distance` / `MaxInnerProduct` expressions and `HnswIndex` / `IvfflatIndex` (needs
+     field-type hooks in `@ghuri/orm`);
+   - hybrid search (Postgres full text, D1 FTS5);
+   - `distinct` (best chunk per document), rerankers (`@cf/baai/bge-reranker-base`).
+3. **Later**: token-based chunking, Vectorize's HTTP API from Node, Turbopuffer / Qdrant stores.
+
+### 21.10 Open questions (proposed answers)
+
+- **`autoIndex` by default.** Haystack's default signal processor does nothing. *Proposed:* on. The manifest digest
+  makes re-saves without text changes free, and background tasks keep embedding out of the request.
+- **Text in metadata.** Vectorize caps metadata at 10 KiB per vector, which suits chunks of up to ~8,000 characters.
+  *Proposed:* store text by default; `storeText: false` for apps that load text from their own rows.
+- **Cross-tenant search.** *Proposed:* none in 0.1. Platform code loops over tenants.
+
+### 21.11 As built (supersedes 21.1–21.10 where they conflict)
+
+- **Peers:** `@ghuri/core` ^0.1.0-alpha.5 and `@ghuri/orm` (required; the models are in the main entry),
+  `@ghuri/agents` (optional; `@ghuri/vectors/agents` imports its types only). `ai` is **not** a peer: AI SDK
+  embedding models are called through their `doEmbed()` (spec v2 to v4), so nothing imports `ai`. The main entry
+  imports nothing Node-only (the wrangler checks use computed `import()` specifiers, as tasks does). A test bundles it
+  with esbuild for workerd and runs indexing and search in Miniflare.
+- **Stores:** `VectorStore` also has `hasEmbedding` and `nativeDeletes` (false for Vectorize). `embedding` throws
+  `InvalidVectorStore` when the store has none.
+  - `pgvector()` has no `chunk` column (the chunk number is in `metadata._chunk`). The default table is
+    `vectors_pgembedding`, or `vectors_pgembedding_<alias>` for other aliases. String range filters compare with
+    `COLLATE "C"`.
+  - `vectors_vectorembedding` has a `BigAutoField` id, `vectorId`, and `uniqueTogether (store, vectorId)`, so two
+    `databaseStore()` aliases can share a database.
+  - Vectorize queries ask for `returnMetadata: 'all'`, so Vectorize's lower `topK` limit for queries that return
+    metadata applies.
+- **Embeddings:**
+  - The store's `providerOptions` replace `AGENTS.PROVIDERS[name]` rather than merging with it.
+  - `ghuri-ai:` also sends `x-ghuri-feature: vectors`.
+  - Known dimensions cover the Workers AI bge / embeddinggemma / qwen3 models and OpenAI's three embedding models.
+  - `openai:` sends `dimensions` only when it differs from the model's known default.
+- **Indexes:**
+  - Names are 1-48 characters of `[A-Za-z0-9_.:-]`. Creating an index with an existing name replaces the old one
+    (and its signal receivers).
+  - `ModelIndex`'s default name is the model's `labelLower` (`'blog.post'`), so the model needs its app label when
+    the index is created.
+  - Added: `keys()`, `ModelIndex.indexPks()`, `document()`, `disconnectSignals()`.
+  - `index()` returns `{ indexed, skipped, deleted, chunks, taskResultId? }`.
+  - Metadata keys match `[A-Za-z0-9_-]{1,64}`, and booleans compare for equality only.
+  - The digest also covers the document prefix and `storeText`.
+  - Without the manifest, native stores delete a changed document's vectors before the upsert (the old chunk count
+    is unknown).
+- **Background:** `VectorIndex.index()` / `delete()` default to `background: false`; `ModelIndex` automatic indexing
+  defaults to `'auto'`.
+- **Agents:**
+  - `searchTool(index, { name, description, k = 5, maxK = 10, filter, exclude, minScore, maxChars = 2000 })`
+    returns a plain `AgentTool` named `search_<index>`. `filter` may be a function of the `ToolContext`.
+  - The subpath also has `formatHits()` and `retrieve()`.
+- **Commands** take `--namespace` too. The **checks** add `vectors.E006` (a pgvector store without known
+  dimensions).
+- **Tests:** 120 tests:
+  - the store contract and the index API on memory, `databaseStore()` (SQLite, PGlite, D1 via Miniflare),
+    `pgvector()` (PGlite + `@electric-sql/pglite-pgvector` 0.0.17, pinned to PGlite 0.5.16) and `vectorize()`
+    (`fakeVectorize()`);
+  - tenant isolation with the real `@ghuri/tenants`, including background runs through `@ghuri/tasks`' dummy
+    backend and `update_index --tenant`;
+  - providers with stubbed `fetch` and AI bindings, the migration check, `ghuri check` messages and the agents
+    tool inside a real `Agent`.
+- **Not yet:**
+  - Vectorize is not tested end to end; Miniflare has no Vectorize and the remote index needs an account.
+  - pgvector is not tested on a Postgres server (postgres.js / Hyperdrive), only on PGlite.
+  - `examples/blog` and the CLI templates do not use vectors yet.
+
+---
+
+## 22. Agent usage limits (`@ghuri/agents`)
+
+Status: **built in `@ghuri/agents` (unreleased, branch `feat/usage-limits`)**; see 22.10 for where it differs from this text. No new package:
+limits live in `@ghuri/agents`, next to the runs they limit.
+
+An AI SaaS pays for every token its users spend. Without a budget, one heavy user (or one tenant's script) can run
+up the model bill for everyone. Usage limits stop a user, a tenant or an anonymous client **before a run starts**
+when they have used their token budget for the day or the month, and answer like DRF's throttles: `429` with
+`Retry-After` until the window resets. Nothing changes for projects that do not set `AGENTS.USAGE_LIMITS`.
+
+No Django equivalent: the closest is DRF throttling (`UserRateThrottle`, `AnonRateThrottle`), which counts
+requests in a cache. Agents count tokens, which are known only after a run, so the counter is a table.
+
+```ts
+// settings.ts
+AGENTS: {
+  USAGE_LIMITS: {
+    user: { day: 200_000, month: 2_000_000 },          // tokens (input + output) per UTC day / month
+    anon: { day: 20_000 },                              // per client address
+    tenant: (subject) => planLimits(subject.key),       // a function: the hook a billing plan plugs into
+  },
+}
+
+// a view of the app: "you have used X of Y tokens"
+import { getUsage } from '@ghuri/agents'
+const usage = await getUsage({ user: request.user })
+// [{ scope: 'user', key: '42', period: 'day', used: 1234, limit: 200000, remaining: 198766, resetsAt }, …]
+```
+
+### 22.1 Where usage is counted
+
+**A counter table, `agents.Usage`** (`agents_usage`), one row per subject per window:
+`scope` (`user` / `tenant` / `anon`), `key`, `period` (`day` / `month`), `start` (the window's first UTC day),
+`inputTokens`, `outputTokens`, `cachedInputTokens`, `totalTokens`, `runs`, `updatedAt`; unique on
+`(scope, key, period, start)`.
+
+- **Why not `agents_run`:** traces are opt-in (`AGENTS.TRACE_RUNS`), may store prompts (privacy, retention), and
+  summing a month of runs before every run is a scan that grows with usage. The counter is one indexed read of at
+  most four rows (two subjects × two windows) before a run, whatever the volume, and works with traces off.
+- **Writes** after every finished run: an `INSERT … ON CONFLICT DO NOTHING` of the missing rows (`bulkCreate` with
+  `ignoreConflicts`) and one `UPDATE … SET total_tokens = total_tokens + n, …` of all of them. Increments are done
+  by the database (`F()`), so concurrent runs never lose counts. Two statements per run, on Postgres, SQLite and D1.
+- **What counts:** `usage.totalTokens` of the run (all steps), else `inputTokens + outputTokens`. Cached input
+  reads are part of the input (the AI SDK's definition) and also kept apart in `cachedInputTokens`. Failed runs
+  report no usage to agents and count nothing.
+- **Windows:** the current UTC day and UTC month. Rows of old windows stay (a history for reports);
+  `Usage.objects.filter({ start__lt: … }).delete()` prunes them.
+
+### 22.2 Subjects
+
+Each run counts against up to two subjects:
+
+| Scope | When | Key |
+|---|---|---|
+| `user` | the run's user is authenticated | the user's pk |
+| `anon` | the user is anonymous | DRF's `getIdent(request)` (the client address) when the run has a `request`, else `'*'` (one shared bucket: programmatic and queued anonymous runs) |
+| `tenant` | a `tenant` value is carried (`captureContext().tenant`, set by `@ghuri/tenants`) | the tenant pk |
+
+Agents read the tenant through core's context carriers, so `@ghuri/agents` does not import `@ghuri/tenants`, and a
+queued run (whose carriers are restored) counts against the same tenant as the request that enqueued it. A scope
+is counted only when `USAGE_LIMITS` covers it (22.3), so a project that limits only users writes only user rows.
+
+### 22.3 Limits
+
+`AGENTS.USAGE_LIMITS` is either an object per scope or one function for every scope:
+
+```ts
+type UsageLimits = { day?: number | null; month?: number | null }            // tokens; null/absent: no limit
+type UsageLimitsValue = UsageLimits | ((subject: UsageSubject) => UsageLimits | null | undefined | Promise<…>)
+USAGE_LIMITS?: { user?: UsageLimitsValue; tenant?: UsageLimitsValue; anon?: UsageLimitsValue }
+             | ((subject: UsageSubject) => UsageLimits | null | undefined | Promise<…>)
+interface UsageSubject { scope: 'user' | 'tenant' | 'anon'; key: string; user: RequestUser }
+```
+
+- A function is called before every run (and by `getUsage()`), so it may read a plan from the database; it should
+  be cheap or cache. Returning `null` means "no limit" (staff, an unlimited plan) but the subject is still counted.
+- **Billing hook:** a future `@ghuri/billing` exposes the subscriber's plan; the project wires it in settings
+  (`tenant: (s) => planFor(s.key).then((p) => p.limits.agentTokens)`). Agents never depend on billing.
+- Limits are across all agents of the project. Per-agent budgets are not in 0.1 (22.9).
+
+### 22.4 Enforcement
+
+One check, `checkUsage()`, runs in the two places every run passes through:
+
+| Way a run starts | Where the check runs | Over the limit |
+|---|---|---|
+| chat view, JSON | `agent.run()` → `prepare()`, after permissions, before the model and the conversation | `Throttled` (429, `Retry-After`) |
+| chat view, SSE | `agent.stream()` → `prepare()`, before the stream response exists | `Throttled` (429, `Retry-After`), JSON body |
+| MCP `ask_<agent>` | `agent.run()` | tool result `isError: true` with the message and `retryAfter` |
+| `agent.run()` / `agent.stream()` | `prepare()` | `UsageLimitExceeded` |
+| `agent.enqueue()` (tasks and queue paths) | before the conversation is created and the job is sent | `UsageLimitExceeded`, nothing enqueued |
+| the queued run itself (`agents.run` task, `consumeAgentQueue`) | `agent.run()` again, when it runs | task: attempt fails (retried, then `FAILED`); queue: message acked and logged, not retried |
+
+A refused run creates no conversation, calls no model and writes no trace. `runFinished` is not sent (no run
+happened); `usageLimitReached` is (22.6).
+
+**Soft limit.** The check reads the counters before a run, and the run is counted after it ends. Two things let a
+subject go over its budget: runs that start at the same time all pass the same check, and the run that crosses the
+limit is finished, not cut off. Overshoot is bounded by (concurrent runs) × (one run's tokens), which
+`Agent.maxSteps` and `maxOutputTokens` bound. A hard limit would need a reservation (an estimate written before
+the run and corrected after), which costs a write per run and an estimate nobody has; it can come later as an
+option without changing the table.
+
+### 22.5 Errors
+
+- `UsageLimitExceeded extends AgentError`: `subject`, `period`, `limit`, `used`, `resetsAt` (a `Date`) and `wait`
+  (seconds until `resetsAt`). When several windows are exceeded it names the one that resets last.
+  Message: `Token usage limit reached for user 42: 200500 of 200000 tokens this day. Resets at 2026-11-24T00:00:00.000Z.`
+- HTTP: `Throttled(wait, 'Token usage limit reached for this <period>.', 'usage_limit_exceeded')`, so the body is
+  DRF's (`{ detail: '… Expected available in N seconds.' }`), the header is `Retry-After: N`, and the code tells a
+  UI the budget is spent (rather than the provider being busy, which is also a 429, §14).
+
+### 22.6 Reading usage, signals, admin
+
+- `getUsage({ user, tenant?, request? })` → one `UsageWindow` per counted scope and period:
+  `{ scope, key, period, start, resetsAt, used, limit, remaining, inputTokens, outputTokens, cachedInputTokens,
+  runs }` (`limit` / `remaining` `null` when unlimited). `tenant` defaults to the carried one.
+- `GET <agents prefix>/usage/` (on every `AgentRouter`, name `agents-usage`): the requesting user's
+  `{ results: UsageWindow[] }`, permissions `AGENTS.PERMISSION_CLASSES`.
+- Signals, robust like `runFinished` (receiver errors are logged): `usageLimitReached`
+  (`{ agent, user, error, subjects }`, sent when a run or enqueue is refused: notify, upsell) and `usageRecorded`
+  (`{ agent, user, subjects, tokens }`, after the counters were updated: an 80 % warning reads `getUsage()`).
+- `@ghuri/agents/admin` (optional peer `@ghuri/admin`): read-only `Usage` and `Run` admins.
+
+### 22.7 Testing
+
+- The counter, the check and every entry point (chat JSON and SSE, MCP, `run()`, both `enqueue()` paths and both
+  queued executions) on SQLite and PGlite; concurrent `recordUsage()` calls on one row lose no tokens; window
+  boundaries with a fixed clock; no `agents_usage` writes without `USAGE_LIMITS`.
+- `makemigrations --check` stays clean (`0003_usage`).
+
+### 22.8 Changes in other packages
+
+| Package | Change |
+|---|---|
+| agents | everything above |
+| tasks | none needed. Nice to have: a way for a task to fail without retries (a refused run is retried until `maxAttempts`) |
+| billing (future) | exposes plan limits as a function the project passes to `AGENTS.USAGE_LIMITS` |
+| docs | "Usage limits" in the agents topic, settings rows |
+
+### 22.9 Open questions (proposed answers)
+
+- **Hourly windows / run counts.** *Proposed:* not in 0.1; `day` and `month` cover budgets, DRF throttles cover
+  request rates.
+- **Cost instead of tokens.** Models differ in price, and cache reads are cheaper. *Proposed:* later, an
+  `AGENTS.USAGE_COST(usage, model)` that turns a run's usage into the counted number; tokens until then.
+- **Per-agent limits.** *Proposed:* later, `Agent.usageLimits` that overrides the settings for one agent with its
+  own counters (`key` prefixed by the agent name).
+- **Time zone.** *Proposed:* UTC windows only; a tenant's local midnight is billing's concern.
+
+### 22.10 As built (supersedes 22.1–22.9 where they conflict)
+
+- **Where:** `src/usage.ts` (settings, subjects, windows, `checkUsage` / `recordUsage` / `getUsage`, signals),
+  `Usage` in `src/models.ts`, migration `agents.0003_usage` (depends only on `0002_run`; generated by
+  makemigrations). Nothing is read or written while `USAGE_LIMITS` is unset; with it set and the agents app missing,
+  a run raises `ImproperlyConfigured` rather than silently not enforcing.
+- **Hook points:** `Agent.checkUsage(user, request?)` (overridable) runs in `prepare()` right after the permission
+  check, so it precedes `resolveModel()`, conversation creation and `beforeRun`; `enqueue()` calls it after
+  `enqueueMode()` (configuration errors first). Counting happens at the start of `finish()`, before
+  `saveMessages()` and `afterRun`, so a failing hook or save cannot lose spent tokens; the subjects are the ones
+  computed by the check (same tenant, same anonymous key).
+- **Anonymous key:** `clientIdent(request)` is a `BaseThrottle` subclass's `getIdent()` (honours `NUM_PROXIES`),
+  truncated to 100 characters, `'*'` without a request or address. The MCP `ask_<agent>` passes its request, so MCP
+  clients are keyed like HTTP ones.
+- **Errors:** `UsageLimitExceeded extends AgentError` (not `Throttled`: its message names the subject, which HTTP
+  answers leave out). The chat view maps it through `modelCallError()` → `usageThrottled()`; `toToolError()` maps
+  it to `ToolError(message, { status: 429, detail: { scope, period, limit, used, resetsAt, retryAfter } })`, which
+  covers MCP and agents used as tools of other agents. `consumeAgentQueue` acks refused jobs with a warning; the
+  `agents.run` task fails its attempt, is retried (up to 3, with the task's backoff) and ends `FAILED` with
+  `exceptionClassPath` naming `UsageLimitExceeded`.
+- **HTTP:** `UsageView` at `usage/` on every `AgentRouter` (`AGENTS.AUTHENTICATION_CLASSES`,
+  `AGENTS.PERMISSION_CLASSES`), `resetsAt` as an ISO string. It returns `{ results: [] }` when limits are off.
+- **Admin:** `@ghuri/agents/admin` registers `UsageAdmin` (no add, all fields read-only, delete resets a window)
+  and `RunAdmin` (no add, read-only). `Conversation` stays unregistered (it is swappable).
+- **Tested** on SQLite and PGlite (`test/usage.test.ts`, plus the tasks path in `test/tasks.test.ts`): no writes
+  without the setting; day / month counting and `getUsage()`; refusal before the model and the conversation; UTC
+  day and month rollover with a fake clock; the window that resets last is reported; carried tenant with an async
+  limits function; scopes counted only when named; anonymous `'*'` bucket; streamed runs; 20 concurrent
+  `recordUsage()` calls on one row; robustness against a failing counter write and receivers; chat view JSON and
+  SSE (`429`, `Retry-After`, no conversation); `GET usage/`; MCP `isError`; both `enqueue()` paths and both queued
+  executions; the admin registration. `@ghuri/tenants` tests pass against the new build. **Not tested:** D1
+  (Miniflare); the package has no D1 harness. `ON CONFLICT DO NOTHING` is supported by D1's SQLite.
+- **Not yet:** partial usage of a failed run (a model error at step 3 loses steps 1–2; the AI SDK throws without
+  usage), hard limits / reservations, cost weighting (`USAGE_COST`), per-agent budgets, hourly windows, a way for
+  `@ghuri/tasks` to fail a task without retries. `ghuri eval` runs count against the eval user like any run.
+
+---
+
+## 23. `@ghuri/billing` (dj-stripe style subscriptions)
+
+Status: **0.1 built** (see 23.11 for where it differs from this text). Repo `ghurijs/billing`, npm
+`@ghuri/billing`, peers `@ghuri/core` and `@ghuri/orm` (required), `@ghuri/rest` and `@ghuri/admin` (optional,
+behind `@ghuri/billing/rest` and `@ghuri/billing/admin`).
+
+A SaaS needs four things from billing: a checkout that starts a subscription, a portal where customers change or
+cancel it, webhooks that keep the app's copy of the subscription true, and a cheap "what may this subscriber do"
+question in app code. dj-stripe answers the first three for Django by mirroring Stripe objects into models; Ghuri
+does the same, with Django names, on Workers, behind a provider adapter so Paddle or Lemon Squeezy can follow.
+
+```ts
+// src/settings.ts
+import { stripe } from '@ghuri/billing'
+BILLING: {
+  PROVIDER: stripe({ secretKey: env.STRIPE_SECRET_KEY, webhookSecret: env.STRIPE_WEBHOOK_SECRET }),
+  SUBSCRIBER_MODEL: 'auth.User',                   // or 'tenants.Tenant' (dj-stripe's DJSTRIPE_SUBSCRIBER_MODEL)
+  // SUBSCRIBER: (c) => currentTenant(),           // who pays for this request (default: the request user)
+  SUCCESS_URL: '/billing/thanks/', CANCEL_URL: '/pricing/', RETURN_URL: '/account/',
+  PLANS: {
+    free: { limits: { agentTokens: { day: 20_000 } } },
+    pro:  { prices: ['pro_monthly', 'pro_yearly'],                     // price ids or lookup keys
+            features: ['export', 'api'], limits: { agentTokens: { day: 500_000, month: 5_000_000 } } },
+  },
+  DEFAULT_PLAN: 'free',
+},
+INSTALLED_APPS: [..., BillingConfig],
+ROOT_URLCONF: [..., path('billing/', include(billingUrls))],            // checkout/, portal/, webhook/
+
+// app code
+const sub = await getSubscription(request.user)          // Subscription | null (the current one)
+if (await hasFeature(request.user, 'export')) { … }
+class ExportView extends APIView { permissionClasses = [IsAuthenticated, HasActiveSubscription] }
+AGENTS: { USAGE_LIMITS: { tenant: usageLimits('agentTokens') } }       // §22, without agents importing billing
+```
+
+### 23.1 Providers
+
+```ts
+interface BillingProvider {
+  readonly name: string                                   // 'stripe'
+  createCustomer(data: { email?, name?, metadata }): Promise<CustomerData>
+  createCheckoutSession(opts: CheckoutOptions): Promise<{ id: string; url: string }>
+  createPortalSession(opts: { customer: string; returnUrl: string }): Promise<{ url: string }>
+  constructEvent(body: string, headers: Headers): Promise<ProviderEvent>   // verifies the signature
+  retrieve(kind: 'customer' | 'product' | 'price' | 'subscription' | 'invoice', id: string): Promise<ObjectData>
+  list(kind: 'product' | 'price'): AsyncIterable<ObjectData>
+  cancelSubscription(id: string, opts: { atPeriodEnd: boolean }): Promise<SubscriptionData>
+  check(): CheckMessage[]
+}
+```
+
+- The provider turns its objects into **normalized data** (`CustomerData`, `ProductData`, `PriceData`,
+  `SubscriptionData`, `InvoiceData`) and its events into `{ id, type, created, livemode, kind, objectId, deleted,
+  object }`. Syncing, models and views see only normalized data, so a second provider is one adapter.
+- **`stripe({ secretKey, webhookSecret, apiVersion?, tolerance?: 300, fetch?, apiBase? })`** talks to the Stripe
+  REST API with `fetch` (form-encoded bodies, `Idempotency-Key` on every POST) and verifies webhooks with WebCrypto.
+  - *Why not the `stripe` SDK:* it runs on Workers (`createFetchHttpClient`, `createSubtleCryptoProvider`), but it
+    is a large bundle for eight endpoints, pins the API version to the SDK release, and needs a fake HTTP client in
+    tests anyway. A `fetch` adapter is small, has no dependency, and `stripe({ fetch })` is the test seam.
+  - `webhookSecret` may be an array (rotation). Signatures: `Stripe-Signature: t=…,v1=…`, HMAC-SHA256 over
+    `"<t>.<raw body>"`, constant-time compare against every `v1`, `|now - t| <= tolerance`.
+  - Stripe moved fields between API versions (`current_period_*` to subscription items, `invoice.subscription` to
+    `invoice.parent`); the adapter reads both shapes.
+- Secrets come from settings only (read from `env`); nothing in the package or its tests holds a real key.
+
+### 23.2 Models (app label `billing`)
+
+dj-stripe's names, a local auto pk and the provider's id in `providerId` (unique). Amounts are integers in the
+currency's minor unit (cents), always next to a `currency` (ISO 4217, lowercase as Stripe sends it).
+
+| Model | Table | Fields (besides `provider`, `providerId`, `livemode`, `metadata`, `created`) |
+|---|---|---|
+| `Customer` | `billing_customer` | `subscriberType`, `subscriberId`, `email`, `name`, `currency`, `deleted` |
+| `Product` | `billing_product` | `name`, `description`, `active` |
+| `Price` | `billing_price` | `product` → Product, `active`, `currency`, `unitAmount`, `type` (`one_time`/`recurring`), `recurringInterval`, `recurringIntervalCount`, `lookupKey`, `nickname`, `trialPeriodDays` |
+| `Subscription` | `billing_subscription` | `customer` → Customer, `status`, `currentPeriodStart/End`, `cancelAtPeriodEnd`, `cancelAt`, `canceledAt`, `endedAt`, `trialStart/End`, `lastEventAt` |
+| `SubscriptionItem` | `billing_subscriptionitem` | `subscription` → Subscription, `price` → Price, `quantity` |
+| `Invoice` | `billing_invoice` | `customer`, `subscription`, `status`, `currency`, `amountDue`, `amountPaid`, `amountRemaining`, `total`, `number`, `hostedInvoiceUrl`, `invoicePdf`, `periodStart/End`, `paidAt` |
+| `Event` | `billing_event` | `type`, `data`, `status` (`pending`/`processed`/`failed`/`ignored`), `attempts`, `error`, `receivedAt`, `processedAt` |
+
+- **The subscriber is a generic owner**, not a swappable foreign key: `subscriberType` is the model label
+  (`'auth.user'`, `'tenants.tenant'`), `subscriberId` its pk as a string, unique together. `BILLING.SUBSCRIBER_MODEL`
+  names the model (default `AUTH_USER_MODEL`). *Why:* a foreign key to a setting-chosen model needs every bundled
+  migration rewritten per project (§14 `migrationsForUserModel`), a tenant table may live in another app or not
+  exist yet, and switching from per-user to per-tenant billing later is a data move, not a schema change. Billing
+  never imports `@ghuri/tenants`. `customer.getSubscriber()` loads the instance through `apps.getModel()`.
+- `Subscription.status` uses Stripe's values (`incomplete`, `incomplete_expired`, `trialing`, `active`,
+  `past_due`, `canceled`, `unpaid`, `paused`). `isActive` is `BILLING.ACTIVE_STATUSES` (default
+  `['active', 'trialing']`); `past_due` keeps access only if the project adds it (grace periods).
+- Payments (PaymentIntent, Charge) are not mirrored in 0.1: invoices carry what a SaaS shows.
+
+### 23.3 Views (`billingUrls`, namespace `billing`)
+
+| Route | Name | What |
+|---|---|---|
+| `POST checkout/` | `billing:checkout` | `{ price \| plan, quantity?, successUrl?, cancelUrl? }` → Checkout Session for the request's subscriber (customer created on first use). JSON: `{ id, url }`; form post: `303` to the session |
+| `POST portal/` | `billing:portal` | `{ returnUrl? }` → Customer Portal session, same responses |
+| `POST webhook/` | `billing:webhook` | CSRF-exempt; verify, store, process |
+
+- Checkout and portal need a subscriber (`BILLING.SUBSCRIBER(c)`, default the authenticated user): 401/403
+  otherwise. Only prices named in `BILLING.PLANS` or active local `Price` rows of active products can be bought, so a
+  client cannot buy an internal price. Redirect URLs must be relative or on `ALLOWED_HOSTS` (open-redirect guard).
+- **Webhook:** bad or missing signature → 400. The event is stored in `Event` by provider id; a duplicate of an
+  event already `processed` / `ignored` answers 200 without processing (idempotency). Otherwise it is processed:
+  - inline in the request (default), answering 200 on success and 500 on failure so the provider retries;
+  - or, with `BILLING.WEBHOOK_TASKS: true` and `@ghuri/tasks` loaded, as the task `billing.processEvent` (through
+    `globalThis[Symbol.for('ghuri.tasks.interop')]`, as agents do, with no import), answering 200 at once.
+- **Processing** is per kind: customer, product and price events upsert; subscription events upsert the
+  subscription and its items (creating missing prices and products); `checkout.session.completed` links the customer
+  and fetches the subscription; invoice events upsert the invoice. Out-of-order delivery: a subscription event older
+  than the stored `lastEventAt` is skipped. Unknown types are stored as `ignored`.
+
+### 23.4 Access in app code
+
+```ts
+getCustomer(subject, { create? }): Promise<Customer | null>
+getSubscription(subject): Promise<Subscription | null>   // the current one: active first, then the latest
+hasActiveSubscription(subject, { plans? }): Promise<boolean>
+getPlan(subject): Promise<PlanInfo>                       // { key, plan, subscription } — DEFAULT_PLAN without one
+getEntitlements(subject): Promise<{ plan, features, limits }>
+hasFeature(subject, feature): Promise<boolean>
+usageLimits(limitKey | (entitlements) => limits, opts?): (subject) => Promise<limits | null>
+```
+
+- `subject` is a model instance (user, tenant), a `Customer`, a reference `{ type?, id }`, or a Hono `Context`
+  (resolved with `BILLING.SUBSCRIBER`). Plans match a subscription item by price id, price lookup key or product id.
+- **`usageLimits()`** fits §22's `AGENTS.USAGE_LIMITS` (`(subject: { scope, key, user }) => { day?, month? } |
+  null`): for the scope that matches `SUBSCRIBER_MODEL` (`tenant` when it is not the user model, else `user`) it
+  reads the plan of the subscriber whose pk is `key`; other scopes get `opts.otherwise` (default null, no limit).
+  Billing does not import agents; the shapes are structural.
+- **`@ghuri/billing/rest`:** `HasActiveSubscription` (DRF permission; `view.requiredPlans` narrows it) and
+  `HasFeature(feature)`. A plain-view decorator `subscriptionRequired({ plans? })` is in the main entry.
+
+### 23.5 Signals, admin, commands
+
+- Signals (sender: the provider): `subscriptionCreated`, `subscriptionUpdated`, `subscriptionCancelled`
+  (`{ subscription, previousStatus }`, cancelled when the status becomes `canceled` or the subscription is deleted),
+  `invoicePaid`, `invoicePaymentFailed` (`{ invoice }`), `webhookProcessed` (`{ event }`, every processed event,
+  dj-stripe's `WEBHOOK_SIGNALS`).
+- `@ghuri/billing/admin`: read-mostly admins for every model; `Event` gets the action "Process again".
+- `ghuri billing_sync [--kinds products,prices]` (dj-stripe's `djstripe_sync_models`) pulls products and prices.
+  `ghuri billing_process_events [--status failed]` re-runs stored events.
+
+### 23.6 Settings and checks
+
+`BILLING: { PROVIDER, SUBSCRIBER_MODEL?, SUBSCRIBER?, PLANS?, DEFAULT_PLAN?, ACTIVE_STATUSES?, SUCCESS_URL?,
+CANCEL_URL?, RETURN_URL?, WEBHOOK_TASKS?, CHECKOUT_OPTIONS? }`.
+
+Checks: `billing.E001` no `PROVIDER`; `billing.E002` missing or malformed secret key (a publishable `pk_` key is an
+error); `billing.E003` missing webhook secret; `billing.E004` `SUBSCRIBER_MODEL` not installed; `billing.E005` a
+plan's `prices` is not a list of strings or `DEFAULT_PLAN` is not a plan; `billing.W001` (deploy) a test key with
+`DEBUG = false`; `billing.W002` `WEBHOOK_TASKS` without `@ghuri/tasks`.
+
+Errors (extend `GhuriError`): `BillingError`, `ProviderError` (status, code, provider message),
+`SignatureVerificationError`, `NoSubscriber`.
+
+### 23.7 Testing
+
+- `@ghuri/billing/testing`: `fakeStripe()` — an in-memory Stripe REST API behind `stripe({ fetch })`: customers,
+  products, prices, checkout and portal sessions, subscriptions; `signPayload(body, secret)` builds a valid
+  `Stripe-Signature`; `fake.event(type, object)` builds an event. No network, no keys.
+- Package tests: signature verification (good, bad, expired, rotated secrets), checkout/portal/webhook views, sync of
+  every kind, idempotency and out-of-order events, access helpers, permission classes, checks, migrations with no
+  missing changes, on SQLite, PGlite and D1.
+
+### 23.8 Changes in other packages
+
+| Package | Change |
+|---|---|
+| agents | none: `usageLimits()` plugs into `AGENTS.USAGE_LIMITS` (§22) |
+| tasks | none: webhooks use the interop object |
+| cli | later: `startproject --billing` adds settings, URLs and `STRIPE_*` vars to `.dev.vars.example` |
+| docs | topic "Billing", dj-stripe cheat-sheet rows |
+
+### 23.9 Phases
+
+1. **0.1**: the Stripe adapter, models, views, access helpers, REST permissions, signals, admin, sync command,
+   checks, testing helpers.
+2. **0.2**: Paddle and Lemon Squeezy adapters, usage-based billing (meter events from §22 counters), one-time
+   payments, proration previews.
+3. **Later**: payment methods and charges, tax ids, coupons in admin, a pricing-table component.
+
+### 23.10 Open questions (proposed answers)
+
+- **Refetch on every event** (dj-stripe re-retrieves objects). *Proposed:* no; trust the signed payload, skip stale
+  subscription events by `lastEventAt`, refetch only what an event does not carry (the subscription of a completed
+  checkout, a missing product).
+- **Grace periods.** *Proposed:* through `ACTIVE_STATUSES` (`['active', 'trialing', 'past_due']`) rather than a
+  separate setting.
+
+### 23.11 As built (supersedes 23.1–23.10 where they conflict)
+
+- **Package:** peers `@ghuri/core`, `@ghuri/orm`, `hono` (required), `@ghuri/rest`, `@ghuri/admin` (optional, only
+  behind `/rest` and `/admin`). Subpaths `.`, `/testing`, `/admin`, `/rest`. Nothing in `src` imports a Node module
+  or an SDK (a test enforces it); a workerd test bundles the app with esbuild and runs checkout, a signed webhook and
+  `getPlan()` on Miniflare + D1. `@ghuri/tasks` is a devDependency only (tests of the interop path).
+- **Provider interface** also has `parseEvent(raw)` (re-processing a stored `Event.data` without its signature);
+  `check({ debug, deploy })` returns the provider's own messages (`E002`, `E003`, `W001`). `stripe()` options:
+  `secretKey`, `webhookSecret` (string or list), `apiVersion` (not pinned by default: the account's version; the
+  normalizers read both pre- and post-2025-03-31 shapes), `tolerance` (300), `maxNetworkRetries` (2, on 429 / 5xx /
+  network errors, same `Idempotency-Key`), `fetch`, `apiBase`. Keys live in private class fields: `JSON.stringify`,
+  `inspect` and the debug page never show them.
+- **Customer uniqueness** is a partial unique constraint `(subscriberType, subscriberId) WHERE NOT deleted`
+  (`billing_customer_subscriber_uniq`), so a subscriber whose Stripe customer was deleted gets a new one. Works on
+  Postgres, SQLite and D1. Two concurrent first checkouts can create two Stripe customers; the loser's is unused.
+- **Plans:** `PlanConfig` also has `trialPeriodDays` (server-side trial for checkouts of the plan). When any plan
+  lists `prices`, checkout accepts only plan prices (by id, lookup key or product); without, any active local price of
+  an active product. `{ plan, interval }` picks the plan's local price with that interval. `getPlan()` returns
+  `{ key, plan, subscription, active }`; `getEntitlements()` adds `active` and `subscription`.
+- **Views:** a missing subscriber is 401 JSON; a provider failure is 502 `{ detail, code }`; redirect URLs are
+  relative (resolved on the request origin) or on the request host / a non-`*` `ALLOWED_HOSTS` entry, and Stripe's
+  `{CHECKOUT_SESSION_ID}` placeholder survives. `subscriptionRequired({ plans?, redirectTo? })` answers 403 or 302.
+- **Webhook processing:** `handleWebhook()` returns `{ eventId, type, result }` with `processed`, `ignored`,
+  `duplicate`, `queued` or `busy`. A delivery claims the stored event with a compare-and-set on `attempts`, so two
+  concurrent deliveries never both process it. Processing is not wrapped in a transaction (D1 has none across
+  statements); every step is an idempotent upsert, so a retry finishes the job. `invoice.deleted` (drafts) deletes the
+  row. Prices and products are deactivated, never deleted, on `*.deleted`. A price whose product is unknown fetches
+  the product; a subscription whose customer is unknown fetches the customer.
+- **Usage limits** match §22.3 as built (`UsageSubject { scope, key, user }` → `{ day?, month? } | null`, called for
+  every run): `usageLimits(limit, { scope?, otherwise?, cacheSeconds? })` caches a subscriber's entitlements in
+  memory for `cacheSeconds` (default 60), cleared in-process by the subscription signals and by
+  `clearEntitlementsCache()`; other isolates see a plan change within the TTL.
+- **Tasks:** `billing.processEvent(eventId)` (`maxAttempts: 3`) is defined in an `onPopulate` hook when the interop
+  object exists, like `agents.run`.
+- **Admin:** every model is registered read-only (no add or delete); events have the action `process_again`.
+- **Tests (64):** the flow suite on SQLite, PGlite and D1 (migrations with no missing changes, sync command,
+  checkout guards, completed checkout, access helpers, duplicate and stale events, cancellation, invoices, product
+  / price / customer events, forged and stale signatures, rotation, failure and replay), Stripe adapter unit tests,
+  REST permissions, the decorator, checks, per-tenant billing, the tasks path, the admin action, workerd.
+- **Workspace:** `billing` sits after `tasks` in `scripts/bootstrap.sh` `REPOS` and `scripts/publish-all.sh` `ORDER`.
+- **Not yet:** `startproject --billing`, an `examples/blog` integration, separate test-mode and live-mode customers
+  for one subscriber (switching keys needs a fresh customer table or `deleted` rows), Paddle / Lemon Squeezy.
