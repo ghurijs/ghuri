@@ -1864,7 +1864,11 @@ Errors (extend `GhuriError`): `InvalidTask`, `InvalidTaskBackend`, `TaskResultDo
   `tasks = tasks`. Generated code does not use `serve({ scheduler })` while the template's core range predates it.
   `examples/blog` has `publishPost` / `purgeRejectedComments` (periodic, `0 3 * * *`), background agent runs, and
   `scripts/portability.sh` runs a task with `ghuri db_worker` on PGlite before serving on Node.
-- **Not yet:** Queues are tested with fake bindings through `app.queue()`, not end to end in Miniflare.
+- **Workers start-up (0.1.0-alpha.1):** nothing may make random values, set timers or do I/O while a module loads
+  (workerd refuses the whole Worker). 0.1.0-alpha.0 made the backends' worker id at module scope and no Worker with
+  `@ghuri/tasks` could start; the id is now made on first use. `test/workerd.test.ts` bundles a project and runs it in
+  workerd with D1 and a real Miniflare Queue producer and consumer (enqueue in a request → `queue()` handler →
+  `SUCCESSFUL`), so start-up and Queues are tested end to end.
 
 ---
 
